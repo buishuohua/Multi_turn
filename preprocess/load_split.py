@@ -14,24 +14,16 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 
 
-def length_process(df, which):
-    max_len = max(df["turn"])
+def loader():
+    PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    DATA_PATH = os.path.join(PROJECT_ROOT, "data")
 
-    for i in range(max_len):
-        col_name = f'len_{i}_{which}'
-        df[col_name] = df[f"len_lst_{which}"].apply(lambda x: x[i] if i < len(x) else None)
-
-    return df
-
-
-def loader(type="ques"):
-    pwd = os.getcwd()
-    actor_file = "./data/gather_actor_attack_results.csv"
-    coa_file = "./data/gather_coa_attack_results.csv"
-    safe_file = "./data/gather_safe_results.csv"
-    actor_path = os.path.join(pwd, actor_file)
-    coa_path = os.path.join(pwd, coa_file)
-    safe_path = os.path.join(pwd, safe_file)
+    actor_file = "gather_actor_attack_results.csv"
+    coa_file = "gather_coa_attack_results.csv"
+    safe_file = "gather_safe_results.csv"
+    actor_path = os.path.join(DATA_PATH, actor_file)
+    coa_path = os.path.join(DATA_PATH, coa_file)
+    safe_path = os.path.join(DATA_PATH, safe_file)
 
     actor_origin = pd.read_csv(actor_path)
     coa_origin = pd.read_csv(coa_path)
@@ -51,26 +43,14 @@ def loader(type="ques"):
     data["question"] = data["question"].apply(ast.literal_eval)
     data["response"] = data["response"].apply(ast.literal_eval)
 
-    data["len_lst_ques"] = data["question"].apply(lambda x: [len(item) for item in x])
-    data["len_lst_resp"] = data["response"].apply(lambda x: [len(item) for item in x])
+    return data
 
-    # data = length_process(data, "ques")
-    # data = length_process(data, "resp")
-
-    if type == "ques":
-        return data.drop(columns=["response"])
-    elif type == "resp":
-        return data.drop(columns=["question"])
-    else:
-        raise TypeError("type must be 'ques' or 'resp'")
-
-
-def train_val_test_split(data, train_size=0.8, val_size=0.1, test_size=0.1, random_state=42):
+def train_val_test_split(data, train_size=0.8, val_size=0.1, test_size=0.1, random_state=42, type="question"):
     if abs(train_size + val_size + test_size - 1.0) > 1e-7:
         raise ValueError("Train, validation, and test sizes must sum to 1")
 
     y = data["category"]
-    X = data.drop(columns=["category"])
+    X = data[f"{type}_truncated"]
 
     remaining_size = train_size + val_size
     test_ratio = test_size / (test_size + remaining_size)
