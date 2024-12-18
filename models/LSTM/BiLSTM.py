@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*- 
+# -*- coding: utf-8 -*-
 
 """
     @ __Author__ = Yunkai.Gao
@@ -8,26 +8,26 @@
 """
 
 from .BaseLSTM import BaseLSTM
-from config.Model_Settings import ModelSettings
+from config.Experiment_Config import ExperimentConfig
 import torch
+import torch.nn as nn
 from typing import Tuple, Optional, Dict, Any
 
+
 class BiLSTM(BaseLSTM):
-    def __init__(self, settings: ModelSettings):
+    def __init__(self, config: ExperimentConfig):
         """
         Bidirectional LSTM implementation
 
         Args:
-            settings (ModelSettings): Model configuration settings
+            config: Complete experiment configuration including model and training settings
         """
-        super().__init__(settings)
-
-        # Additional initialization if needed for BiLSTM specific features
-        self.dropout = nn.Dropout(settings.dropout_rate)
+        super().__init__(config)
+        self.dropout = nn.Dropout(config.model_settings.dropout_rate)
 
     def forward(self, x: torch.Tensor,
                 hidden: Optional[Tuple[torch.Tensor, torch.Tensor]] = None) -> Tuple[
-        torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+            torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
         Forward pass implementation
 
@@ -39,22 +39,28 @@ class BiLSTM(BaseLSTM):
             output: Model output
             (h_n, c_n): Final hidden state and cell state
         """
+
         batch_size = x.size(0)
 
-        # Get embeddings using BERT tokenizer
-        embeddings = self.embedding(x)
+        # Get embeddings
+        if not self.config.model_settings.fine_tune_embedding:
+            with torch.no_grad():
+                embeddings = self.embedding_model(x)[0]
+        else:
+            embeddings = self.embedding_model(x)[0]
 
-        # Initialize hidden state if not provided
-        if hidden is None:
-            hidden = self.init_hidden(batch_size)
-
-        # BiLSTM forward pass
+        # LSTM
         lstm_out, (h_n, c_n) = self.lstm(embeddings, hidden)
 
-        # Apply dropout
-        lstm_out = self.dropout(lstm_out)
+        # We need the last time step output for classification
+        # Take the last time step or mean of all time steps
+        if self.config.model_settings.pooling == 'last':
+            lstm_out = lstm_out[:, -1, :]  # Take last time step
+        else:
+            lstm_out = torch.mean(lstm_out, dim=1)  # Mean pooling
 
-        # Pass through fully connected layers
+        # Apply dropout and FC layers
+        lstm_out = self.dropout(lstm_out)
         output = self.fc_layers(lstm_out)
 
         return output, (h_n, c_n)
@@ -64,8 +70,7 @@ class BiLSTM(BaseLSTM):
         info = super().get_model_info()
         info.update({
             'model_variant': 'BiLSTM',
-            'embedding_type': self.settings.embedding_type,
             'bidirectional': True,
-            'num_layers': len(self.settings.hidden_dims)
+            'device': self.config.training_settings.device
         })
         return info

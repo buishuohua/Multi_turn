@@ -10,6 +10,7 @@
 from dataclasses import dataclass
 from typing import Optional, Literal
 import torch
+import torch.nn as nn
 
 
 @dataclass
@@ -86,3 +87,4 @@ class TrainingSettings:
             factor=self.scheduler_factor,
             min_lr=self.min_learning_rate
         )
+

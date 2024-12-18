@@ -27,7 +27,7 @@ def truncate(data, tokenizer, max_tokens, which, method):
     """
     Truncate sentences and store token IDs.
     """
-    sentences = data[which].values  # Get as numpy array for iteration
+    sentences = data[which].values
     tokenized_data = []
     truncated_texts = []
 
@@ -39,26 +39,31 @@ def truncate(data, tokenizer, max_tokens, which, method):
             tokens_per_sent = (max_tokens - num_seps - 2) // num_sentences
             tokens_per_sent = min(tokens_per_sent, max_tokens // num_sentences)
 
-            # Initialize list for all token IDs
             sent_tokens = []
             trunc_texts = []
             for sent in sent_series:
                 tokens = tokenizer(
                     sent,
                     truncation=True,
+                    padding="max_length",
                     max_length=tokens_per_sent,
                     add_special_tokens=False,
-                    return_tensors=None
+                    return_tensors='pt'
                 )
-                sent_tokens.append(tokens['input_ids'][:tokens_per_sent])
-                trunc_texts.append(tokenizer.decode(tokens['input_ids'][:tokens_per_sent]))
+                # Get the token IDs as a list
+                tokens_list = tokens['input_ids'].squeeze(
+                    0).tolist()  # Add squeeze(0)
+                sent_tokens.append(tokens_list)
+                trunc_texts.append(tokenizer.decode(tokens_list))
 
         elif method == "ratio":
-            token_lengths = [len(tokenizer.encode(sent)) for sent in sent_series]
+            token_lengths = [len(tokenizer.encode(sent))
+                             for sent in sent_series]
             total_original_tokens = sum(token_lengths)
             available_tokens = max_tokens - num_seps - 2
 
-            proportions = [length/total_original_tokens for length in token_lengths]
+            proportions = [
+                length/total_original_tokens for length in token_lengths]
             allocated_tokens = [min(max(1, int(prop * available_tokens)),
                                     max_tokens // num_sentences)
                                 for prop in proportions]
@@ -69,17 +74,21 @@ def truncate(data, tokenizer, max_tokens, which, method):
                 tokens = tokenizer(
                     sent,
                     truncation=True,
+                    padding="max_length",
                     max_length=max_len,
                     add_special_tokens=False,
-                    return_tensors=None
+                    return_tensors='pt'
                 )
-                sent_tokens.append(tokens['input_ids'][:max_len])
-                trunc_texts.append(tokenizer.decode(tokens['input_ids'][:max_len]))
+                tokens_list = tokens['input_ids'].squeeze(
+                    0).tolist()  # Add squeeze(0)
+                sent_tokens.append(tokens_list)
+                trunc_texts.append(tokenizer.decode(tokens_list))
 
         # Combine all tokens with [CLS] and [SEP]
         final_tokens = [tokenizer.cls_token_id]
-        for idx, tokens in enumerate(sent_tokens):
-            final_tokens.extend(tokens)
+        # Change variable name for clarity
+        for idx, token_list in enumerate(sent_tokens):
+            final_tokens.extend(token_list)  # Now extending with a list
             if idx < len(sent_tokens) - 1:
                 final_tokens.append(tokenizer.sep_token_id)
         final_tokens.append(tokenizer.sep_token_id)
@@ -97,8 +106,8 @@ def truncate(data, tokenizer, max_tokens, which, method):
         tokenized_data.append(final_tokens)
         truncated_texts.append(" [SEP] ".join(trunc_texts))
 
-    # Create new DataFrame columns
-    data = data.copy()  # Create a copy to avoid SettingWithCopyWarning
+    # Store both tokenized IDs and truncated text
+    data = data.copy()
     data[f"{which}_tokenized"] = tokenized_data
     data[f"{which}_truncated"] = truncated_texts
 

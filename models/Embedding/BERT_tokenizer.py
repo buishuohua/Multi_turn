@@ -7,11 +7,9 @@
     @ Description:
 """
 
-import numpy as np
 from dataclasses import dataclass
 from transformers import AutoTokenizer, AutoModel
 from typing import Any
-import torch.nn as nn
 
 
 @dataclass

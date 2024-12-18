@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*- 
+# -*- coding: utf-8 -*-
 
 """
     @ __Author__ = Yunkai.Gao
@@ -63,7 +63,8 @@ class Trainer:
 
         # Initialize training components
         self.criterion = nn.CrossEntropyLoss()
-        self.optimizer = torch.optim.Adam(model.parameters(), lr=config.training_settings.learning_rate)
+        self.optimizer = torch.optim.Adam(
+            model.parameters(), lr=config.training_settings.learning_rate)
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer,
             mode='min',
@@ -74,9 +75,12 @@ class Trainer:
 
         # Create directories
         os.makedirs(config.training_settings.save_model_dir, exist_ok=True)
-        os.makedirs(os.path.join(config.training_settings.save_model_dir, 'checkpoints'), exist_ok=True)
-        os.makedirs(os.path.join(config.training_settings.save_results_dir, 'figures'), exist_ok=True)
-        os.makedirs(os.path.join(config.training_settings.save_results_dir, 'metrics'), exist_ok=True)
+        os.makedirs(os.path.join(
+            config.training_settings.save_model_dir, 'checkpoints'), exist_ok=True)
+        os.makedirs(os.path.join(
+            config.training_settings.save_results_dir, 'figures'), exist_ok=True)
+        os.makedirs(os.path.join(
+            config.training_settings.save_results_dir, 'metrics'), exist_ok=True)
 
         # Initialize tracking variables
         self.train_losses = []
@@ -94,26 +98,31 @@ class Trainer:
         for batch in tqdm(self.train_loader, desc='Training'):
             self.optimizer.zero_grad()
 
-            inputs = batch['input_ids'].to(self.config.training_settings.device)
-            labels = batch['labels'].to(self.config.training_settings.device)
+            # First element is input
+            inputs = batch[0].to(self.config.training_settings.device)
+            # Second element is label
+            labels = batch[1].to(self.config.training_settings.device)
 
             outputs, _ = self.model(inputs)
+            # outputs shape should be [batch_size, num_classes]
+            # labels shape should be [batch_size]
             loss = self.criterion(outputs, labels)
 
             loss.backward()
 
             if self.config.training_settings.gradient_clip is not None:
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.training_settings.gradient_clip)
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    self.config.training_settings.gradient_clip
+                )
 
             self.optimizer.step()
 
             total_loss += loss.item()
-
             preds = torch.argmax(outputs, dim=1)
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
 
-        # Calculate metrics
         metrics = calculate_metrics(all_labels, all_preds)
         metrics['loss'] = total_loss / len(self.train_loader)
 
@@ -127,8 +136,9 @@ class Trainer:
 
         with torch.no_grad():
             for batch in tqdm(loader, desc=f'Evaluating ({phase})'):
-                inputs = batch['input_ids'].to(self.config.training_settings.device)
-                labels = batch['labels'].to(self.config.training_settings.device)
+                inputs, labels = batch  # Changed this line
+                inputs = inputs.to(self.config.training_settings.device)
+                labels = labels.to(self.config.training_settings.device)
 
                 outputs, _ = self.model(inputs)
                 loss = self.criterion(outputs, labels)
@@ -174,7 +184,8 @@ class Trainer:
 
         # Save best model
         if is_best:
-            best_path = os.path.join(self.config.training_settings.save_model_dir, 'best_model.pt')
+            best_path = os.path.join(
+                self.config.training_settings.save_model_dir, 'best_model.pt')
             torch.save(checkpoint, best_path)
 
     def plot_confusion_matrix(self, y_true, y_pred, epoch):
@@ -195,7 +206,8 @@ class Trainer:
 
     def plot_metrics(self):
         """Plot all metrics history"""
-        metrics_to_plot = ['accuracy', 'precision_macro', 'recall_macro', 'f1_macro']
+        metrics_to_plot = ['accuracy', 'precision_macro',
+                           'recall_macro', 'f1_macro']
 
         plt.figure(figsize=(15, 10))
         for i, metric in enumerate(metrics_to_plot, 1):
@@ -211,7 +223,8 @@ class Trainer:
             plt.legend()
 
         plt.tight_layout()
-        plt.savefig(os.path.join(self.config.training_settings.save_results_dir, 'figures', 'metrics_plot.png'))
+        plt.savefig(os.path.join(
+            self.config.training_settings.save_results_dir, 'figures', 'metrics_plot.png'))
         plt.close()
 
     def train(self):
@@ -282,7 +295,8 @@ class Trainer:
                 break
 
         # Final evaluation on test set
-        test_metrics, test_preds, test_labels = self.evaluate(self.test_loader, 'test')
+        test_metrics, test_preds, test_labels = self.evaluate(
+            self.test_loader, 'test')
         self.save_metrics(test_metrics, 'final', 'test')
 
         print("\nFinal Test Results:")

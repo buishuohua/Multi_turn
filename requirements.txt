@@ -6,3 +6,4 @@ matplotlib~=3.9.2
 seaborn~=0.13.2
 tqdm~=4.67.1
 transformers~=4.47.0
+joblib~=1.4.2

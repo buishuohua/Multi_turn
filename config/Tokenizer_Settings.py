@@ -8,7 +8,7 @@
 """
 
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Literal
 from models.Embedding.BERT_tokenizer import BERTs
 from models.Embedding.GloVe import GloVes
 

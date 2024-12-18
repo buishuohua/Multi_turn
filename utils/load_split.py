@@ -51,7 +51,7 @@ def _loader_data():
     return data
 
 
-def train_val_test_split(data, train_size, val_size, test_size, type):
+def train_val_test_split(data, train_size, val_size, test_size, type, random_state):
     """Split data preserving both tokenized and truncated columns"""
     if abs(train_size + val_size + test_size - 1.0) > 1e-7:
         raise ValueError("Train, validation, and test sizes must sum to 1")
@@ -111,47 +111,23 @@ def loader(config):
         train_size=config.data_settings.train_size,
         val_size=config.data_settings.val_size,
         test_size=config.data_settings.test_size,
-        type=config.data_settings.which
+        type=config.data_settings.which,
+        random_state=config.data_settings.random_state
     )
 
-    # Tokenize text data and convert to tensors
-    train_encoding = tokenizer(
-        X_train[f"{config.data_settings.which}_truncated"].tolist(),
-        padding=True,
-        truncation=True,
-        max_length=config.tokenizer_settings.max_length,
-        return_tensors='pt'
-    )
-
-    val_encoding = tokenizer(
-        X_val[f"{config.data_settings.which}_truncated"].tolist(),
-        padding=True,
-        truncation=True,
-        max_length=config.tokenizer_settings.max_length,
-        return_tensors='pt'
-    )
-
-    test_encoding = tokenizer(
-        X_test[f"{config.data_settings.which}_truncated"].tolist(),
-        padding=True,
-        truncation=True,
-        max_length=config.tokenizer_settings.max_length,
-        return_tensors='pt'
-    )
-
-    # Create datasets
+    # Create datasets directly from tokenized data
     train_dataset = TensorDataset(
-        train_encoding['input_ids'],
+        torch.tensor(X_train[f"{config.data_settings.which}_tokenized"].tolist(), dtype=torch.long),
         torch.tensor(label_encoder.transform(y_train), dtype=torch.long)
     )
 
     val_dataset = TensorDataset(
-        val_encoding['input_ids'],
+        torch.tensor(X_val[f"{config.data_settings.which}_tokenized"].tolist(), dtype=torch.long),
         torch.tensor(label_encoder.transform(y_val), dtype=torch.long)
     )
 
     test_dataset = TensorDataset(
-        test_encoding['input_ids'],
+        torch.tensor(X_test[f"{config.data_settings.which}_tokenized"].tolist(), dtype=torch.long),
         torch.tensor(label_encoder.transform(y_test), dtype=torch.long)
     )
 
