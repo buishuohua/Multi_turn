@@ -11,7 +11,7 @@ from .BaseLSTM import BaseLSTM
 from config.Experiment_Config import ExperimentConfig
 import torch
 import torch.nn as nn
-from typing import Tuple, Optional, Dict, Any
+from typing import Tuple, Optional, Dict, Any, List
 
 
 class BiLSTM(BaseLSTM):
@@ -26,51 +26,68 @@ class BiLSTM(BaseLSTM):
         self.dropout = nn.Dropout(config.model_settings.dropout_rate)
 
     def forward(self, x: torch.Tensor,
-                hidden: Optional[Tuple[torch.Tensor, torch.Tensor]] = None) -> Tuple[
-            torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+                hidden: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None) -> Tuple[
+            torch.Tensor, List[Tuple[torch.Tensor, torch.Tensor]]]:
         """
         Forward pass implementation
 
         Args:
             x: Input tensor of shape (batch_size, sequence_length)
-            hidden: Optional initial hidden states
+            hidden: Optional initial hidden states for each layer
 
         Returns:
             output: Model output
-            (h_n, c_n): Final hidden state and cell state
+            hidden_states: List of (h_n, c_n) for each layer
         """
-
         batch_size = x.size(0)
 
         # Get embeddings
         if not self.config.model_settings.fine_tune_embedding:
             with torch.no_grad():
-                embeddings = self.embedding_model(x)[0]
+                x = self.embedding_model(x)[0]
         else:
-            embeddings = self.embedding_model(x)[0]
+            x = self.embedding_model(x)[0]
 
-        # LSTM
-        lstm_out, (h_n, c_n) = self.lstm(embeddings, hidden)
+        # Initialize hidden states if not provided
+        if hidden is None:
+            hidden = self.init_hidden(batch_size)
 
-        # We need the last time step output for classification
-        # Take the last time step or mean of all time steps
+        # Process through LSTM layers
+        current_hidden_states = []
+        for i, lstm_layer in enumerate(self.lstm):
+            # Process current layer
+            x, (h_n, c_n) = lstm_layer(x, hidden[i])
+            current_hidden_states.append((h_n, c_n))
+            
+            # Apply dropout between layers (except last layer)
+            if i < len(self.lstm) - 1:
+                x = self.dropout(x)
+
+        # Apply pooling strategy
         if self.config.model_settings.pooling == 'last':
-            lstm_out = lstm_out[:, -1, :]  # Take last time step
-        else:
-            lstm_out = torch.mean(lstm_out, dim=1)  # Mean pooling
+            # Take the last time step
+            x = x[:, -1, :]
+        else:  # 'mean' pooling
+            # Average across all time steps
+            x = torch.mean(x, dim=1)
 
-        # Apply dropout and FC layers
-        lstm_out = self.dropout(lstm_out)
-        output = self.fc_layers(lstm_out)
+        # Final dropout before FC layer
+        x = self.dropout(x)
+        
+        # Pass through fully connected layers
+        output = self.fc_layers(x)
 
-        return output, (h_n, c_n)
+        return output, current_hidden_states
 
     def get_model_info(self) -> Dict[str, Any]:
         """Get model information for logging"""
         info = super().get_model_info()
         info.update({
-            'model_variant': 'BiLSTM',
-            'bidirectional': True,
-            'device': self.config.training_settings.device
+            'model_type': 'BiLSTM',
+            'bidirectional': self.config.model_settings.bidirectional,
+            'num_layers': len(self.lstm),
+            'hidden_dims': self.config.model_settings.hidden_dims,
+            'pooling_strategy': self.config.model_settings.pooling,
+            'dropout_rate': self.config.model_settings.dropout_rate
         })
         return info
