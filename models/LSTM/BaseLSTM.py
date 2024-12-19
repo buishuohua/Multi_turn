@@ -10,9 +10,13 @@
 import torch
 import torch.nn as nn
 from abc import ABC, abstractmethod
-from typing import Tuple, Optional, Dict, Any, List
+from typing import Tuple, Optional, Dict, Any, List, TYPE_CHECKING
 
-from config.Experiment_Config import ExperimentConfig
+if TYPE_CHECKING:
+    from config.Experiment_Config import ExperimentConfig
+
+# Add this import for runtime
+from typing import Any as ExperimentConfig  # temporary type alias
 
 
 class BaseLSTM(nn.Module, ABC):

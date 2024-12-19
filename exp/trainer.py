@@ -7,20 +7,21 @@
     @ Description:
 """
 
+from typing import TYPE_CHECKING
 import torch
-import torch.nn as nn
 import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix
 from sklearn.metrics import precision_recall_fscore_support, accuracy_score
 import seaborn as sns
-from torch.utils.data import DataLoader
+from utils.load_split import loader
 import json
 import os
 from tqdm import tqdm
-from config.Experiment_Config import ExperimentConfig
-import re
-from datetime import datetime
-import numpy as np
+
+if TYPE_CHECKING:
+    from config.Experiment_Config import ExperimentConfig
+else:
+    from typing import Any as ExperimentConfig  # runtime type alias
 
 
 def calculate_metrics(y_true, y_pred):
@@ -50,90 +51,115 @@ def calculate_metrics(y_true, y_pred):
 
 
 class Trainer:
-    def __init__(
-            self,
-            model,
-            train_loader: DataLoader,
-            val_loader: DataLoader,
-            test_loader: DataLoader,
-            config: ExperimentConfig
-    ):
-        self.model = model
-        self.train_loader = train_loader
-        self.val_loader = val_loader
-        self.test_loader = test_loader
+    def __init__(self, config: ExperimentConfig):
         self.config = config
-        
+
+        # Load data automatically
+        self.train_loader, self.val_loader, self.test_loader, self.label_encoder = loader(
+            config)
+
+        # Automatically set output dimension based on number of classes
+        self._set_output_dimension()
+
+        # Initialize model with correct output dimension
+        self.model = self.config.model_selection.get_model(config)
+        self.model = self.model.to(self.config.training_settings.device)
+
         # Create experiment name with timestamp and key parameters
         self.experiment_name = self._create_experiment_name()
-        
+
         # Initialize training components
         self.criterion = self.config.model_settings.get_loss()
-        self.optimizer = self.config.training_settings.get_optimizer(self.model.parameters())
-        self.scheduler = self.config.training_settings.get_scheduler(self.optimizer)
-        
-        # Create directories with experiment name
-        self.model_dir = os.path.join(config.training_settings.save_model_dir, self.experiment_name)
-        self.results_dir = os.path.join(config.training_settings.save_results_dir, self.experiment_name)
-        self._create_directories()
-        
+        self.optimizer = self.config.training_settings.get_optimizer(
+            self.model.parameters())
+        self.scheduler = self.config.training_settings.get_scheduler(
+            self.optimizer)
+
+        # Create directories
+        self._setup_directories()
+
         # Initialize tracking variables
+        self._initialize_tracking_variables()
+
+    def _set_output_dimension(self):
+        """Automatically set the output dimension based on number of classes"""
+        num_classes = len(self.label_encoder.classes_)
+        self.config.model_settings.output_dim = num_classes
+        # Store class names for confusion matrix
+        self.config.data_settings.class_names = self.label_encoder.classes_.tolist()
+
+    def _initialize_tracking_variables(self):
+        """Initialize variables for tracking training progress"""
         self.start_epoch = 0
         self.train_losses = []
         self.val_losses = []
         self.metrics_history = []
         self.best_val_loss = float('inf')
         self.patience_counter = 0
+        self.continue_training = self.config.training_settings.continue_training
 
-    def _create_experiment_name(self):
-        """Create unique experiment name with key parameters"""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        model_type = self.config.model_selection.model_type
-        layers = self.config.model_settings.num_layers
-        hidden = self.config.model_settings.init_hidden_dim
-        lr = self.config.training_settings.learning_rate
-        return f"{model_type}_l{layers}_h{hidden}_lr{lr}_{timestamp}"
+    def _setup_directories(self):
+        """Set up necessary directories for saving results"""
+        self.model_dir = os.path.join(
+            self.config.training_settings.save_model_dir,
+            self.experiment_name
+        )
+        self.results_dir = os.path.join(
+            self.config.training_settings.save_results_dir,
+            self.experiment_name
+        )
 
-    def _create_directories(self):
-        """Create necessary directories for saving results"""
         os.makedirs(self.model_dir, exist_ok=True)
         os.makedirs(os.path.join(self.model_dir, 'checkpoints'), exist_ok=True)
         os.makedirs(os.path.join(self.results_dir, 'figures'), exist_ok=True)
         os.makedirs(os.path.join(self.results_dir, 'metrics'), exist_ok=True)
 
+    def _create_experiment_name(self):
+        """Create unique experiment name with key parameters"""
+        model_type = self.config.model_selection.model_type
+        tokenizer_name = self.config.tokenizer_settings.name
+        layers = self.config.model_settings.num_layers
+        return f"{model_type}_{tokenizer_name}_l{layers}"
+
     def load_checkpoint(self, checkpoint_path=None):
         """Load checkpoint for continuing training"""
         if checkpoint_path is None:
-            # Find the latest checkpoint
-            checkpoint_dir = os.path.join(self.model_dir, 'checkpoints')
-            if not os.path.exists(checkpoint_dir):
-                return False
-                
-            checkpoints = [f for f in os.listdir(checkpoint_dir) if f.endswith('.pt')]
-            if not checkpoints:
-                return False
-                
-            # Extract epoch numbers and find the latest
-            epoch_numbers = [int(re.search(r'epoch_(\d+)', cp).group(1)) for cp in checkpoints]
-            latest_checkpoint = checkpoints[epoch_numbers.index(max(epoch_numbers))]
-            checkpoint_path = os.path.join(checkpoint_dir, latest_checkpoint)
-        
+            # Try to load latest checkpoint first
+            latest_path = os.path.join(self.model_dir, 'latest_model.pt')
+            if os.path.exists(latest_path):
+                checkpoint_path = latest_path
+            else:
+                # Fall back to finding the most recent checkpoint in checkpoints directory
+                checkpoint_dir = os.path.join(self.model_dir, 'checkpoints')
+                if not os.path.exists(checkpoint_dir):
+                    return False
+
+                checkpoints = [f for f in os.listdir(checkpoint_dir) if f.endswith('.pt')]
+                if not checkpoints:
+                    return False
+
+                # Extract epoch numbers and find the latest
+                epoch_numbers = [int(re.search(r'epoch_(\d+)', cp).group(1))
+                               for cp in checkpoints]
+                latest_checkpoint = checkpoints[epoch_numbers.index(max(epoch_numbers))]
+                checkpoint_path = os.path.join(checkpoint_dir, latest_checkpoint)
+
         print(f"Loading checkpoint: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path)
-        
+
         # Load model and training state
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         self.start_epoch = checkpoint['epoch']
         self.best_val_loss = checkpoint['val_loss']
-        
+
         # Load training history if available
         if 'train_losses' in checkpoint:
             self.train_losses = checkpoint['train_losses']
             self.val_losses = checkpoint['val_losses']
             self.metrics_history = checkpoint['metrics_history']
-            
+
         return True
 
     def save_checkpoint(self, epoch, val_loss, is_best=False):
@@ -150,64 +176,80 @@ class Trainer:
             'metrics_history': self.metrics_history
         }
 
-        # Save regular checkpoint
-        checkpoint_path = os.path.join(
-            self.model_dir,
-            'checkpoints',
-            f'checkpoint_epoch_{epoch}.pt'
-        )
-        torch.save(checkpoint, checkpoint_path)
+        # Save as latest checkpoint (overwriting previous latest)
+        latest_path = os.path.join(self.model_dir, 'latest_model.pt')
+        torch.save(checkpoint, latest_path)
+        print(f"Saved latest checkpoint at epoch {epoch}")
 
-        # Save best model
+        # Save periodic checkpoint if at checkpoint frequency
+        if epoch % self.config.training_settings.checkpoint_freq == 0:
+            checkpoint_path = os.path.join(
+                self.model_dir,
+                'checkpoints',
+                f'{self.experiment_name}_epoch_{epoch}.pt'
+            )
+            torch.save(checkpoint, checkpoint_path)
+            print(f"Saved periodic checkpoint at epoch {epoch}")
+
+        # Save best model if it's the best so far
         if is_best:
             best_path = os.path.join(self.model_dir, 'best_model.pt')
             torch.save(checkpoint, best_path)
+            print("Saved new best model")
 
     def plot_confusion_matrix(self, y_true, y_pred, epoch):
         """Plot enhanced confusion matrix"""
         plt.figure(figsize=(12, 10))
         cm = confusion_matrix(y_true, y_pred)
-        
+
         # Calculate percentages
         cm_percent = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis] * 100
-        
+
         # Create annotation text with both count and percentage
         annotations = np.array([f'{count}\n({percent:.1f}%)'
-                              for count, percent in zip(cm.flatten(), cm_percent.flatten())])
+                                for count, percent in zip(cm.flatten(), cm_percent.flatten())])
         annotations = annotations.reshape(cm.shape)
-        
+
         # Plot with improved aesthetics
         sns.heatmap(cm, annot=annotations, fmt='', cmap='Blues',
-                   xticklabels=self.config.data_settings.class_names,
-                   yticklabels=self.config.data_settings.class_names)
-        
+                    xticklabels=self.config.data_settings.class_names,
+                    yticklabels=self.config.data_settings.class_names)
+
         plt.title(f'Confusion Matrix - {self.experiment_name}\nEpoch {epoch}')
         plt.ylabel('True Label')
         plt.xlabel('Predicted Label')
-        
+
         # Save with experiment name
         plt.savefig(os.path.join(
             self.results_dir,
             'figures',
-            f'confusion_matrix_epoch_{epoch}.png'
+            f'confusion_matrix_{self.experiment_name}_epoch_{epoch}.png'
         ), bbox_inches='tight', dpi=300)
         plt.close()
 
     def plot_metrics(self):
-        """Plot enhanced metrics history"""
-        metrics_to_plot = ['accuracy', 'precision_macro', 'recall_macro', 'f1_macro']
-        
-        plt.figure(figsize=(15, 10))
-        for i, metric in enumerate(metrics_to_plot, 1):
-            plt.subplot(2, 2, i)
+        """Plot enhanced metrics history including both macro and micro metrics"""
+        metrics_to_plot = [
+            ('accuracy', 'Accuracy'),
+            ('precision_macro', 'Precision (Macro)'),
+            ('precision_micro', 'Precision (Micro)'),
+            ('recall_macro', 'Recall (Macro)'),
+            ('recall_micro', 'Recall (Micro)'),
+            ('f1_macro', 'F1 (Macro)'),
+            ('f1_micro', 'F1 (Micro)')
+        ]
+
+        plt.figure(figsize=(20, 15))
+        for i, (metric, title) in enumerate(metrics_to_plot, 1):
+            plt.subplot(3, 3, i)
             train_metric = [m[f'train_{metric}'] for m in self.metrics_history]
             val_metric = [m[f'val_{metric}'] for m in self.metrics_history]
-            
-            plt.plot(train_metric, label=f'Train {metric}', marker='o', markersize=4)
-            plt.plot(val_metric, label=f'Val {metric}', marker='o', markersize=4)
-            plt.title(f'{metric.replace("_", " ").title()}\n{self.experiment_name}')
+
+            plt.plot(train_metric, label=f'Train', marker='o', markersize=4)
+            plt.plot(val_metric, label=f'Val', marker='o', markersize=4)
+            plt.title(f'{title}\n{self.experiment_name}')
             plt.xlabel('Epoch')
-            plt.ylabel(metric.replace('_', ' ').title())
+            plt.ylabel('Score')
             plt.grid(True, linestyle='--', alpha=0.7)
             plt.legend()
 
@@ -219,9 +261,9 @@ class Trainer:
         ), bbox_inches='tight', dpi=300)
         plt.close()
 
-    def train(self, continue_training=False):
+    def train(self):
         """Train model with option to continue from checkpoint"""
-        if continue_training:
+        if self.continue_training:
             loaded = self.load_checkpoint()
             if loaded:
                 print(f"Continuing training from epoch {self.start_epoch + 1}")
@@ -229,15 +271,14 @@ class Trainer:
                 print("No checkpoint found, starting fresh training")
                 self.start_epoch = 0
 
-        print(f"Training on device: {self.config.training_settings.device}")
         print(f"Experiment name: {self.experiment_name}")
-        
+
         self.model = self.model.to(self.config.training_settings.device)
 
         for epoch in range(self.config.training_settings.num_epochs - 1):
             print(
                 f"\nEpoch {epoch + 1}/{self.config.training_settings.num_epochs} - "
-                f"{self.config.training_settings.experiment_name}")
+                f"{self.experiment_name}")
 
             # Training phase
             train_metrics = self.train_epoch()

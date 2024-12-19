@@ -21,3 +21,16 @@ class DataSettings:
     batch_size: int = 32,
     shuffle: bool = True,
     drop_last: bool = True,
+
+    @classmethod
+    def get_default(cls):
+        return cls(
+            which="question",
+            random_state=42,
+            train_size=0.8,
+            val_size=0.1,
+            test_size=0.1,
+            batch_size=32,
+            shuffle=True,
+            drop_last=True
+        )

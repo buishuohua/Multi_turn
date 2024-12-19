@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*- 
+# -*- coding: utf-8 -*-
 
 """
     @ __Author__ = Yunkai.Gao
@@ -27,3 +27,14 @@ class TokenizerSettings:
             return BERTs.get_tokenizer(self.name)
         elif self.embedding_type == 'glove':
             return GloVes.get_tokenizer(self.name)
+
+    @classmethod
+    def get_default(cls):
+        return cls(
+            name='BERT_base_uncased',
+            truncation='ratio',
+            embedding_type='bert',
+            max_length=512,
+            padding=True,
+            add_special_tokens=True
+        )

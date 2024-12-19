@@ -8,10 +8,10 @@
 """
 
 from .BaseLSTM import BaseLSTM
-from config.Experiment_Config import ExperimentConfig
 import torch
 import torch.nn as nn
 from typing import Tuple, Optional, Dict, Any, List
+from config.Experiment_Config import ExperimentConfig
 
 
 class BiLSTM(BaseLSTM):
@@ -58,7 +58,7 @@ class BiLSTM(BaseLSTM):
             # Process current layer
             x, (h_n, c_n) = lstm_layer(x, hidden[i])
             current_hidden_states.append((h_n, c_n))
-            
+
             # Apply dropout between layers (except last layer)
             if i < len(self.lstm) - 1:
                 x = self.dropout(x)
@@ -73,7 +73,7 @@ class BiLSTM(BaseLSTM):
 
         # Final dropout before FC layer
         x = self.dropout(x)
-        
+
         # Pass through fully connected layers
         output = self.fc_layers(x)
 
