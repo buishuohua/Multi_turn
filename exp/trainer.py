@@ -237,15 +237,18 @@ class Trainer:
                     xticklabels=self.config.data_settings.class_names,
                     yticklabels=self.config.data_settings.class_names,
                     square=True,
-                    cbar_kws={'label': 'Count', 'labelsize': 10},
+                    cbar_kws={'label': 'Count'},  # Removed labelsize from here
                     vmin=0,
                     annot_kws={'size': 7},  # Smaller font for numbers in cells
                     )
 
+        # Get the colorbar and adjust its label size
+        cbar = ax.collections[0].colorbar
+        cbar.ax.tick_params(labelsize=10)  # Set colorbar tick label size
+        cbar.set_label('Count', size=10)   # Set colorbar label size
+
         # Adjust label sizes and rotation
-        plt.xticks(rotation=45, ha='right', color='black',
-                   fontsize=8)  # 45-degree angle for x labels
-        # Horizontal y labels
+        plt.xticks(rotation=45, ha='right', color='black', fontsize=8)
         plt.yticks(rotation=0, color='black', fontsize=8)
 
         # Move x-axis labels up slightly to prevent cutoff
@@ -275,7 +278,7 @@ class Trainer:
                 base_path, f'confusion_matrix_{self.experiment_name}_epoch_{epoch}.png')
 
         plt.savefig(save_path, bbox_inches='tight', dpi=300, facecolor='white',
-                    pad_inches=0.5)  # Added padding around the plot
+                    pad_inches=0.5)
         plt.close()
 
     def plot_metrics(self):
