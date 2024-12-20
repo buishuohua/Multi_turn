@@ -67,7 +67,7 @@ def train_val_test_split(data, train_size, val_size, test_size, type, random_sta
         X, y,
         test_size=test_ratio,
         stratify=y,
-        random_state=42,
+        random_state=random_state,
         shuffle=True
     )
 
@@ -77,7 +77,7 @@ def train_val_test_split(data, train_size, val_size, test_size, type, random_sta
         X_temp, y_temp,
         test_size=val_ratio,
         stratify=y_temp,
-        random_state=42,
+        random_state=random_state,
         shuffle=True
     )
 
@@ -134,21 +134,21 @@ def loader(config):
     # Create dataloaders
     train_loader = DataLoader(
         train_dataset,
-        batch_size=config.data_settings.batch_size,
+        batch_size=config.training_settings.batch_size,
         shuffle=config.data_settings.shuffle,
         drop_last=config.data_settings.drop_last
     )
 
     val_loader = DataLoader(
         val_dataset,
-        batch_size=config.data_settings.batch_size,
+        batch_size=config.training_settings.batch_size,
         shuffle=False,
         drop_last=config.data_settings.drop_last
     )
 
     test_loader = DataLoader(
         test_dataset,
-        batch_size=config.data_settings.batch_size,
+        batch_size=config.training_settings.batch_size,
         shuffle=False,
         drop_last=config.data_settings.drop_last
     )

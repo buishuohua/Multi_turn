@@ -30,6 +30,11 @@ class BERTs:
         tokenizer=AutoTokenizer.from_pretrained("bert-large-uncased"),
         model=AutoModel.from_pretrained("bert-large-uncased")
     )
+    BERT_base_multilingual_cased = Tokenizer(
+        name="BERT_base_multilingual_cased",
+        tokenizer=AutoTokenizer.from_pretrained("bert-base-multilingual-cased"),
+        model=AutoModel.from_pretrained("bert-base-multilingual-cased")
+    )
 
     @classmethod
     def get_tokenizer(cls, name: str) -> Tokenizer:

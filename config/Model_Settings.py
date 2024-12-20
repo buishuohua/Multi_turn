@@ -74,7 +74,7 @@ class ModelSettings:
         if not all(isinstance(dim, int) and dim > 0 for dim in self.hidden_dims):
             raise ValueError("All hidden dimensions must be positive integers")
 
-        if self.output_dim <= 0:
+        if self.output_dim is not None and self.output_dim <= 0:
             raise ValueError("output_dim must be positive")
 
     def _get_model_name(self) -> str:
@@ -140,7 +140,7 @@ class ModelSettings:
             errors.append("dropout_rate must be between 0 and 1")
 
         # Validate dimensions
-        if self.output_dim <= 0:
+        if self.output_dim is not None and self.output_dim <= 0:
             errors.append("output_dim must be positive")
 
         if self.init_hidden_dim <= 0:

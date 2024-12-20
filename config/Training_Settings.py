@@ -19,7 +19,7 @@ import re
 class TrainingSettings:
     """Specific training configurations"""
     num_epochs: int = 100
-    batch_size: int = 32
+    batch_size: int = 256
 
     # Optimization settings
     learning_rate: float = 0.001
@@ -73,7 +73,8 @@ class TrainingSettings:
             for file in files:
                 if file.endswith('.pt') and 'epoch_' in file:
                     try:
-                        epoch_num = int(re.search(r'epoch_(\d+)', file).group(1))
+                        epoch_num = int(
+                            re.search(r'epoch_(\d+)', file).group(1))
                         latest_epoch = max(latest_epoch, epoch_num)
                     except (AttributeError, ValueError):
                         continue

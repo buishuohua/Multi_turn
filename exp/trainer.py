@@ -17,6 +17,9 @@ from utils.load_split import loader
 import json
 import os
 from tqdm import tqdm
+import re
+import numpy as np
+import pandas as pd
 
 if TYPE_CHECKING:
     from config.Experiment_Config import ExperimentConfig
@@ -109,10 +112,18 @@ class Trainer:
             self.experiment_name
         )
 
+        # Create model directories
         os.makedirs(self.model_dir, exist_ok=True)
         os.makedirs(os.path.join(self.model_dir, 'checkpoints'), exist_ok=True)
+        os.makedirs(os.path.join(self.model_dir, 'latest'), exist_ok=True)
+
+        # Create results directories
         os.makedirs(os.path.join(self.results_dir, 'figures'), exist_ok=True)
+        os.makedirs(os.path.join(self.results_dir,
+                    'figures', 'latest'), exist_ok=True)
         os.makedirs(os.path.join(self.results_dir, 'metrics'), exist_ok=True)
+        os.makedirs(os.path.join(self.results_dir,
+                    'metrics', 'latest'), exist_ok=True)
 
     def _create_experiment_name(self):
         """Create unique experiment name with key parameters"""
@@ -134,15 +145,18 @@ class Trainer:
                 if not os.path.exists(checkpoint_dir):
                     return False
 
-                checkpoints = [f for f in os.listdir(checkpoint_dir) if f.endswith('.pt')]
+                checkpoints = [f for f in os.listdir(
+                    checkpoint_dir) if f.endswith('.pt')]
                 if not checkpoints:
                     return False
 
                 # Extract epoch numbers and find the latest
                 epoch_numbers = [int(re.search(r'epoch_(\d+)', cp).group(1))
-                               for cp in checkpoints]
-                latest_checkpoint = checkpoints[epoch_numbers.index(max(epoch_numbers))]
-                checkpoint_path = os.path.join(checkpoint_dir, latest_checkpoint)
+                                 for cp in checkpoints]
+                latest_checkpoint = checkpoints[epoch_numbers.index(
+                    max(epoch_numbers))]
+                checkpoint_path = os.path.join(
+                    checkpoint_dir, latest_checkpoint)
 
         print(f"Loading checkpoint: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path)
@@ -162,6 +176,11 @@ class Trainer:
 
         return True
 
+    def _ensure_dir_exists(self, path):
+        """Ensure directory exists, create if it doesn't"""
+        if not os.path.exists(path):
+            os.makedirs(path, exist_ok=True)
+
     def save_checkpoint(self, epoch, val_loss, is_best=False):
         """Save model checkpoint with training history"""
         checkpoint = {
@@ -176,89 +195,236 @@ class Trainer:
             'metrics_history': self.metrics_history
         }
 
-        # Save as latest checkpoint (overwriting previous latest)
-        latest_path = os.path.join(self.model_dir, 'latest_model.pt')
+        # Ensure directories exist
+        latest_dir = os.path.join(self.model_dir, 'latest')
+        checkpoints_dir = os.path.join(self.model_dir, 'checkpoints')
+        self._ensure_dir_exists(latest_dir)
+        self._ensure_dir_exists(checkpoints_dir)
+
+        # Save latest model
+        latest_path = os.path.join(latest_dir, f'{self.experiment_name}.pt')
         torch.save(checkpoint, latest_path)
-        print(f"Saved latest checkpoint at epoch {epoch}")
 
-        # Save periodic checkpoint if at checkpoint frequency
-        if epoch % self.config.training_settings.checkpoint_freq == 0:
+        # Save periodic checkpoint
+        if isinstance(epoch, int):
             checkpoint_path = os.path.join(
-                self.model_dir,
-                'checkpoints',
-                f'{self.experiment_name}_epoch_{epoch}.pt'
-            )
+                checkpoints_dir, f'{self.experiment_name}_epoch_{epoch}.pt')
             torch.save(checkpoint, checkpoint_path)
-            print(f"Saved periodic checkpoint at epoch {epoch}")
+            print(f"Saved checkpoint at epoch {epoch}")
 
-        # Save best model if it's the best so far
+        # Save best model
         if is_best:
-            best_path = os.path.join(self.model_dir, 'best_model.pt')
+            best_path = os.path.join(
+                self.model_dir, f'{self.experiment_name}_best.pt')
             torch.save(checkpoint, best_path)
-            print("Saved new best model")
+            print(f"Saved best model at epoch {epoch}")
 
     def plot_confusion_matrix(self, y_true, y_pred, epoch):
-        """Plot enhanced confusion matrix"""
-        plt.figure(figsize=(12, 10))
+        """Plot enhanced confusion matrix with better readability for many classes"""
+        # Compute confusion matrix
         cm = confusion_matrix(y_true, y_pred)
 
-        # Calculate percentages
-        cm_percent = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis] * 100
+        # Create figure with white background - increased figure size for better readability
+        plt.figure(figsize=(20, 16), facecolor='white')
+        ax = plt.gca()
+        ax.set_facecolor('white')
 
-        # Create annotation text with both count and percentage
-        annotations = np.array([f'{count}\n({percent:.1f}%)'
-                                for count, percent in zip(cm.flatten(), cm_percent.flatten())])
-        annotations = annotations.reshape(cm.shape)
-
-        # Plot with improved aesthetics
-        sns.heatmap(cm, annot=annotations, fmt='', cmap='Blues',
+        # Plot with better visibility
+        sns.heatmap(cm,
+                    annot=True,
+                    fmt='d',
+                    cmap='Blues',
                     xticklabels=self.config.data_settings.class_names,
-                    yticklabels=self.config.data_settings.class_names)
+                    yticklabels=self.config.data_settings.class_names,
+                    square=True,
+                    cbar_kws={'label': 'Count', 'labelsize': 10},
+                    vmin=0,
+                    annot_kws={'size': 7},  # Smaller font for numbers in cells
+                    )
 
-        plt.title(f'Confusion Matrix - {self.experiment_name}\nEpoch {epoch}')
-        plt.ylabel('True Label')
-        plt.xlabel('Predicted Label')
+        # Adjust label sizes and rotation
+        plt.xticks(rotation=45, ha='right', color='black',
+                   fontsize=8)  # 45-degree angle for x labels
+        # Horizontal y labels
+        plt.yticks(rotation=0, color='black', fontsize=8)
 
-        # Save with experiment name
-        plt.savefig(os.path.join(
-            self.results_dir,
-            'figures',
-            f'confusion_matrix_{self.experiment_name}_epoch_{epoch}.png'
-        ), bbox_inches='tight', dpi=300)
+        # Move x-axis labels up slightly to prevent cutoff
+        ax.xaxis.set_tick_params(
+            labelsize=8, rotation=45, ha='right', rotation_mode='anchor')
+
+        # Add titles with appropriate sizing
+        plt.title(f'Confusion Matrix - {self.experiment_name}\nEpoch {epoch}',
+                  pad=20, fontsize=14, color='black')
+        plt.xlabel('Predicted Label', labelpad=15, color='black', fontsize=12)
+        plt.ylabel('True Label', labelpad=15, color='black', fontsize=12)
+
+        # Add more padding to prevent label cutoff
+        plt.tight_layout(pad=1.1)
+
+        # Ensure directories exist and save
+        base_path = os.path.join(self.results_dir, 'figures')
+        latest_figures_dir = os.path.join(base_path, 'latest')
+        self._ensure_dir_exists(base_path)
+        self._ensure_dir_exists(latest_figures_dir)
+
+        if epoch == 'latest':
+            save_path = os.path.join(
+                latest_figures_dir, f'confusion_matrix_{self.experiment_name}.png')
+        else:
+            save_path = os.path.join(
+                base_path, f'confusion_matrix_{self.experiment_name}_epoch_{epoch}.png')
+
+        plt.savefig(save_path, bbox_inches='tight', dpi=300, facecolor='white',
+                    pad_inches=0.5)  # Added padding around the plot
         plt.close()
 
     def plot_metrics(self):
-        """Plot enhanced metrics history including both macro and micro metrics"""
-        metrics_to_plot = [
+        """Plot metrics with path checking"""
+        metric_pairs = [
             ('accuracy', 'Accuracy'),
-            ('precision_macro', 'Precision (Macro)'),
-            ('precision_micro', 'Precision (Micro)'),
-            ('recall_macro', 'Recall (Macro)'),
-            ('recall_micro', 'Recall (Micro)'),
-            ('f1_macro', 'F1 (Macro)'),
-            ('f1_micro', 'F1 (Micro)')
+            (('precision_macro', 'precision_micro'), 'Precision (Macro vs Micro)'),
+            (('recall_macro', 'recall_micro'), 'Recall (Macro vs Micro)'),
+            (('f1_macro', 'f1_micro'), 'F1 (Macro vs Micro)')
         ]
 
-        plt.figure(figsize=(20, 15))
-        for i, (metric, title) in enumerate(metrics_to_plot, 1):
-            plt.subplot(3, 3, i)
-            train_metric = [m[f'train_{metric}'] for m in self.metrics_history]
-            val_metric = [m[f'val_{metric}'] for m in self.metrics_history]
+        plt.figure(figsize=(20, 15), facecolor='white')
 
-            plt.plot(train_metric, label=f'Train', marker='o', markersize=4)
-            plt.plot(val_metric, label=f'Val', marker='o', markersize=4)
-            plt.title(f'{title}\n{self.experiment_name}')
-            plt.xlabel('Epoch')
-            plt.ylabel('Score')
-            plt.grid(True, linestyle='--', alpha=0.7)
-            plt.legend()
+        for i, (metric, title) in enumerate(metric_pairs, 1):
+            plt.subplot(2, 2, i)
+            ax = plt.gca()
+            ax.set_facecolor('white')
+
+            if isinstance(metric, tuple):
+                # Plot macro and micro metrics together
+                for m, style in zip(metric, ['-o', '--s']):
+                    train_metric = [h[f'train_{m}']
+                                    for h in self.metrics_history]
+                    val_metric = [h[f'val_{m}'] for h in self.metrics_history]
+                    label_suffix = '(Macro)' if 'macro' in m else '(Micro)'
+                    plt.plot(train_metric, style, label=f'Train {label_suffix}',
+                             markersize=4, color='blue' if 'macro' in m else 'red')
+                    plt.plot(val_metric, style, label=f'Val {label_suffix}',
+                             markersize=4, color='lightblue' if 'macro' in m else 'lightcoral')
+            else:
+                # Plot single metric
+                train_metric = [h[f'train_{metric}']
+                                for h in self.metrics_history]
+                val_metric = [h[f'val_{metric}'] for h in self.metrics_history]
+                plt.plot(train_metric, '-o', label='Train',
+                         markersize=4, color='blue')
+                plt.plot(val_metric, '--s', label='Val',
+                         markersize=4, color='lightblue')
+
+            plt.title(title, color='black', pad=10)
+            plt.xlabel('Epoch', color='black')
+            plt.ylabel('Score', color='black')
+            plt.grid(True, linestyle='--', alpha=0.3, color='gray')
+
+            # Set legend with black text
+            legend = plt.legend(facecolor='white', edgecolor='black')
+            plt.setp(legend.get_texts(), color='black')
+
+            # Set spine colors to black
+            for spine in ax.spines.values():
+                spine.set_color('black')
+
+            # Set tick colors to black
+            ax.tick_params(colors='black')
+
+        plt.suptitle(f'Training Metrics - {self.experiment_name}',
+                     color='black', fontsize=16, y=1.02)
+        plt.tight_layout()
+
+        # Ensure directories exist
+        base_path = os.path.join(self.results_dir, 'figures')
+        latest_figures_dir = os.path.join(base_path, 'latest')
+        self._ensure_dir_exists(base_path)
+        self._ensure_dir_exists(latest_figures_dir)
+
+        # Save both versions
+        plt.savefig(os.path.join(base_path, f'metrics_plot_{self.experiment_name}.png'),
+                    bbox_inches='tight', dpi=300, facecolor='white')
+        plt.savefig(os.path.join(latest_figures_dir, f'metrics_plot_{self.experiment_name}.png'),
+                    bbox_inches='tight', dpi=300, facecolor='white')
+        plt.close()
+
+    def plot_class_performance(self, y_true, y_pred, epoch):
+        """Plot class performance with path checking"""
+        # Calculate per-class metrics
+        class_names = self.config.data_settings.class_names
+        precision, recall, f1, support = precision_recall_fscore_support(
+            y_true, y_pred, labels=range(len(class_names)), zero_division=0
+        )
+
+        # Create DataFrame for metrics
+        metrics_df = pd.DataFrame({
+            'Class': class_names,
+            'Precision': precision,
+            'Recall': recall,
+            'F1': f1,
+            'Support': support
+        })
+
+        # Sort by F1 score
+        metrics_df = metrics_df.sort_values('F1', ascending=True)
+
+        # Plot with white background
+        plt.figure(figsize=(15, 10), facecolor='white')
+        ax = plt.gca()
+        ax.set_facecolor('white')
+
+        x = range(len(class_names))
+        width = 0.25
+
+        # Plot bars
+        plt.barh([i - width for i in x], metrics_df['Precision'], width,
+                 label='Precision', color='skyblue')
+        plt.barh([i for i in x], metrics_df['Recall'], width,
+                 label='Recall', color='lightgreen')
+        plt.barh([i + width for i in x], metrics_df['F1'], width,
+                 label='F1', color='salmon')
+
+        # Style improvements with black text
+        plt.yticks(x, metrics_df['Class'], color='black')
+        plt.xlabel('Score', color='black')
+        plt.title(f'Per-class Performance - {self.experiment_name}\nEpoch {epoch}',
+                  color='black')
+
+        # Set legend with black text
+        legend = plt.legend(facecolor='white', edgecolor='black')
+        # Set legend text color to black
+        plt.setp(legend.get_texts(), color='black')
+
+        # Add support numbers
+        for i, support in enumerate(metrics_df['Support']):
+            plt.text(0.02, i, f'n={support}', va='center', color='black')
+
+        # Set grid with light color
+        plt.grid(True, linestyle='--', alpha=0.3, color='gray')
+
+        # Ensure all spines are black
+        for spine in ax.spines.values():
+            spine.set_color('black')
+
+        # Set tick colors to black
+        ax.tick_params(colors='black')
 
         plt.tight_layout()
-        plt.savefig(os.path.join(
-            self.results_dir,
-            'figures',
-            f'metrics_plot_{self.experiment_name}.png'
-        ), bbox_inches='tight', dpi=300)
+
+        # Ensure directories exist
+        base_path = os.path.join(self.results_dir, 'figures')
+        latest_figures_dir = os.path.join(base_path, 'latest')
+        self._ensure_dir_exists(base_path)
+        self._ensure_dir_exists(latest_figures_dir)
+
+        if epoch == 'latest':
+            save_path = os.path.join(
+                latest_figures_dir, f'class_performance_{self.experiment_name}.png')
+        else:
+            save_path = os.path.join(
+                base_path, f'class_performance_{self.experiment_name}_epoch_{epoch}.png')
+
+        plt.savefig(save_path, bbox_inches='tight', dpi=300, facecolor='white')
         plt.close()
 
     def train(self):
@@ -272,10 +438,9 @@ class Trainer:
                 self.start_epoch = 0
 
         print(f"Experiment name: {self.experiment_name}")
-
         self.model = self.model.to(self.config.training_settings.device)
 
-        for epoch in range(self.config.training_settings.num_epochs - 1):
+        for epoch in range(self.start_epoch, self.config.training_settings.num_epochs):
             print(
                 f"\nEpoch {epoch + 1}/{self.config.training_settings.num_epochs} - "
                 f"{self.experiment_name}")
@@ -286,11 +451,9 @@ class Trainer:
             # Validation phase
             val_metrics, val_preds, val_labels = self.evaluate(self.val_loader)
 
-            # Store losses
+            # Store losses and metrics
             self.train_losses.append(train_metrics['loss'])
             self.val_losses.append(val_metrics['loss'])
-
-            # Store metrics
             epoch_metrics = {
                 f'train_{k}': v for k, v in train_metrics.items()
             }
@@ -311,29 +474,67 @@ class Trainer:
             for k, v in val_metrics.items():
                 print(f"{k}: {v:.4f}")
 
-            # Save checkpoints and plots every N epochs
+            # Always save latest model and plots after each epoch
+            # Save latest model
+            self.save_checkpoint(epoch + 1, val_metrics['loss'], is_best=False)
+            self.plot_confusion_matrix(val_labels, val_preds, 'latest')
+            self.plot_class_performance(val_labels, val_preds, 'latest')
+            self.save_metrics(train_metrics, 'latest', 'train')
+            self.save_metrics(val_metrics, 'latest', 'val')
+            self.plot_metrics()
+
+            # Periodic checkpoint saving remains the same
             if (epoch + 1) % self.config.training_settings.checkpoint_freq == 0:
-                # Save metrics
+                # Save numbered checkpoint
+                checkpoint_path = os.path.join(
+                    self.model_dir,
+                    'checkpoints',
+                    f'checkpoint_epoch_{epoch + 1}.pt'
+                )
+                torch.save({
+                    'epoch': epoch + 1,
+                    'model_state_dict': self.model.state_dict(),
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'scheduler_state_dict': self.scheduler.state_dict(),
+                    'val_loss': val_metrics['loss'],
+                    'config': self.config.to_dict(),
+                    'train_losses': self.train_losses,
+                    'val_losses': self.val_losses,
+                    'metrics_history': self.metrics_history
+                }, checkpoint_path)
+
+                # Save periodic plots and metrics
+                self.plot_confusion_matrix(val_labels, val_preds, epoch + 1)
+                self.plot_class_performance(val_labels, val_preds, epoch + 1)
                 self.save_metrics(train_metrics, epoch + 1, 'train')
                 self.save_metrics(val_metrics, epoch + 1, 'val')
 
-                # Save checkpoint
-                is_best = val_metrics['loss'] < self.best_val_loss
-                if is_best:
-                    self.best_val_loss = val_metrics['loss']
-                    self.patience_counter = 0
-                else:
-                    self.patience_counter += 1
+            # Best model saving logic
+            is_best = val_metrics['loss'] < self.best_val_loss
+            if is_best:
+                self.best_val_loss = val_metrics['loss']
+                self.patience_counter = 0
+                # Save best model and plots
+                best_path = os.path.join(self.model_dir, 'best_model.pt')
+                torch.save({
+                    'epoch': epoch + 1,
+                    'model_state_dict': self.model.state_dict(),
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'scheduler_state_dict': self.scheduler.state_dict(),
+                    'val_loss': val_metrics['loss'],
+                    'config': self.config.to_dict(),
+                    'train_losses': self.train_losses,
+                    'val_losses': self.val_losses,
+                    'metrics_history': self.metrics_history
+                }, best_path)
+                self.plot_confusion_matrix(val_labels, val_preds, 'best')
+                self.plot_class_performance(val_labels, val_preds, 'best')
+                self.save_metrics(train_metrics, 'best', 'train')
+                self.save_metrics(val_metrics, 'best', 'val')
+            else:
+                self.patience_counter += 1
 
-                self.save_checkpoint(epoch + 1, val_metrics['loss'], is_best)
-
-                # Plot confusion matrix
-                self.plot_confusion_matrix(val_labels, val_preds, epoch + 1)
-
-                # Plot metrics
-                self.plot_metrics()
-
-            # Early stopping
+            # Early stopping check
             if self.patience_counter >= self.config.training_settings.early_stopping_patience:
                 print(f"\nEarly stopping triggered after {epoch + 1} epochs")
                 break
@@ -420,7 +621,19 @@ class Trainer:
 
     def save_metrics(self, metrics, epoch, phase):
         """Save metrics to JSON file"""
-        metrics_file = os.path.join(self.config.training_settings.save_results_dir, 'metrics',
-                                    f'{phase}_metrics_epoch_{epoch}.json')
+        metrics_dir = os.path.join(self.results_dir, 'metrics')
+        latest_metrics_dir = os.path.join(metrics_dir, 'latest')
+
+        # Ensure directories exist
+        self._ensure_dir_exists(metrics_dir)
+        self._ensure_dir_exists(latest_metrics_dir)
+
+        if epoch == 'latest':
+            metrics_file = os.path.join(
+                latest_metrics_dir, f'{phase}_metrics_{self.experiment_name}.json')
+        else:
+            metrics_file = os.path.join(
+                metrics_dir, f'{phase}_metrics_{self.experiment_name}_epoch_{epoch}.json')
+
         with open(metrics_file, 'w') as f:
             json.dump(metrics, f, indent=4)
