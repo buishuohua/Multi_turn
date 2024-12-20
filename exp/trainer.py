@@ -133,30 +133,45 @@ class Trainer:
         return f"{model_type}_{tokenizer_name}_l{layers}"
 
     def load_checkpoint(self, checkpoint_path=None):
-        """Load checkpoint for continuing training"""
+        """Load checkpoint with fallback strategy"""
         if checkpoint_path is None:
-            # Try to load latest checkpoint first
-            latest_path = os.path.join(self.model_dir, 'latest_model.pt')
+            # First try to load latest checkpoint
+            latest_path = os.path.join(
+                self.model_dir, 'latest', f'{self.experiment_name}_latest.pt')
+
             if os.path.exists(latest_path):
                 checkpoint_path = latest_path
             else:
-                # Fall back to finding the most recent checkpoint in checkpoints directory
-                checkpoint_dir = os.path.join(self.model_dir, 'checkpoints')
-                if not os.path.exists(checkpoint_dir):
-                    return False
+                # If no latest checkpoint, check checkpoints directory
+                checkpoints_dir = os.path.join(self.model_dir, 'checkpoints')
+                if os.path.exists(checkpoints_dir):
+                    checkpoint_files = [f for f in os.listdir(checkpoints_dir)
+                                        if f.endswith('.pt') and self.experiment_name in f]
+                    if checkpoint_files:
+                        # Extract epoch numbers and find the latest
+                        epoch_numbers = []
+                        for filename in checkpoint_files:
+                            match = re.search(r'epoch_(\d+)\.pt$', filename)
+                            if match:
+                                epoch_numbers.append(int(match.group(1)))
 
-                checkpoints = [f for f in os.listdir(
-                    checkpoint_dir) if f.endswith('.pt')]
-                if not checkpoints:
+                        if epoch_numbers:
+                            latest_epoch = max(epoch_numbers)
+                            checkpoint_path = os.path.join(
+                                checkpoints_dir,
+                                f'{self.experiment_name}_epoch_{latest_epoch}.pt'
+                            )
+                            print(
+                                f"Found checkpoint from epoch {latest_epoch}")
+                        else:
+                            print("No valid checkpoint files found")
+                            return False
+                    else:
+                        print("Empty checkpoints directory, starting fresh training")
+                        return False
+                else:
+                    print("No checkpoints directory found, starting fresh training")
                     return False
-
-                # Extract epoch numbers and find the latest
-                epoch_numbers = [int(re.search(r'epoch_(\d+)', cp).group(1))
-                                 for cp in checkpoints]
-                latest_checkpoint = checkpoints[epoch_numbers.index(
-                    max(epoch_numbers))]
-                checkpoint_path = os.path.join(
-                    checkpoint_dir, latest_checkpoint)
 
         print(f"Loading checkpoint: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path)
@@ -165,15 +180,20 @@ class Trainer:
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        # This is the last completed epoch
         self.start_epoch = checkpoint['epoch']
         self.best_val_loss = checkpoint['val_loss']
 
-        # Load training history if available
+        # Load training history
         if 'train_losses' in checkpoint:
             self.train_losses = checkpoint['train_losses']
             self.val_losses = checkpoint['val_losses']
             self.metrics_history = checkpoint['metrics_history']
 
+        # Print latest epoch info
+        latest_epoch = checkpoint.get('latest_epoch', self.start_epoch)
+        print(f"Latest completed epoch: {latest_epoch}")
+        print(f"Resuming training from epoch {self.start_epoch + 1}")
         return True
 
     def _ensure_dir_exists(self, path):
@@ -192,7 +212,8 @@ class Trainer:
             'config': self.config.to_dict(),
             'train_losses': self.train_losses,
             'val_losses': self.val_losses,
-            'metrics_history': self.metrics_history
+            'metrics_history': self.metrics_history,
+            'latest_epoch': epoch  # Add latest epoch info directly in checkpoint
         }
 
         # Ensure directories exist
@@ -201,23 +222,25 @@ class Trainer:
         self._ensure_dir_exists(latest_dir)
         self._ensure_dir_exists(checkpoints_dir)
 
-        # Save latest model
-        latest_path = os.path.join(latest_dir, f'{self.experiment_name}.pt')
+        # Always save/update latest model
+        latest_path = os.path.join(
+            latest_dir, f'{self.experiment_name}_latest.pt')
         torch.save(checkpoint, latest_path)
 
-        # Save periodic checkpoint
-        if isinstance(epoch, int):
+        # Save periodic checkpoint based on frequency
+        if (epoch + 1) % self.config.training_settings.checkpoint_freq == 0:
             checkpoint_path = os.path.join(
-                checkpoints_dir, f'{self.experiment_name}_epoch_{epoch}.pt')
+                checkpoints_dir, f'{self.experiment_name}_epoch_{epoch + 1}.pt'
+            )
             torch.save(checkpoint, checkpoint_path)
-            print(f"Saved checkpoint at epoch {epoch}")
+            print(f"Saved checkpoint at epoch {epoch + 1}")
 
-        # Save best model
+        # Save best model if needed
         if is_best:
             best_path = os.path.join(
                 self.model_dir, f'{self.experiment_name}_best.pt')
             torch.save(checkpoint, best_path)
-            print(f"Saved best model at epoch {epoch}")
+            print(f"Saved best model at epoch {epoch + 1}")
 
     def plot_confusion_matrix(self, y_true, y_pred, epoch):
         """Plot enhanced confusion matrix with better readability for many classes"""
@@ -237,27 +260,54 @@ class Trainer:
                     xticklabels=self.config.data_settings.class_names,
                     yticklabels=self.config.data_settings.class_names,
                     square=True,
-                    cbar_kws={'label': 'Count'},  # Removed labelsize from here
+                    cbar_kws={
+                        'label': 'Count',
+                        'orientation': 'vertical',
+                        'pad': 0.02,    # Reduce padding
+                        'fraction': 0.046  # Make colorbar thinner
+                    },
                     vmin=0,
                     annot_kws={'size': 7},  # Smaller font for numbers in cells
                     )
 
         # Get the colorbar and adjust its label size
         cbar = ax.collections[0].colorbar
-        cbar.ax.tick_params(labelsize=10)  # Set colorbar tick label size
-        cbar.set_label('Count', size=10)   # Set colorbar label size
+        cbar.ax.tick_params(labelsize=10)
+        cbar.set_label('Count', size=10)
 
         # Adjust label sizes and rotation
-        plt.xticks(rotation=45, ha='right', color='black', fontsize=8)
+        plt.xticks(rotation=45, color='black', fontsize=8)
+        # Set horizontal alignment separately
+        ax.set_xticklabels(ax.get_xticklabels(), ha='right')
         plt.yticks(rotation=0, color='black', fontsize=8)
 
-        # Move x-axis labels up slightly to prevent cutoff
-        ax.xaxis.set_tick_params(
-            labelsize=8, rotation=45, ha='right', rotation_mode='anchor')
+        # Enhanced title with better spacing and formatting
+        if epoch == 'latest':
+            current_epoch = len(self.metrics_history)
+            title_lines = [
+                'Confusion Matrix (Latest)',
+                f'{self.experiment_name}',
+                f'Epoch {current_epoch}/{self.config.training_settings.num_epochs}'
+            ]
+        else:
+            title_lines = [
+                'Confusion Matrix (Checkpoint)',
+                f'{self.experiment_name}',
+                f'Epoch {epoch}/{self.config.training_settings.num_epochs}'
+            ]
+
+        plt.title('\n'.join(title_lines),
+                  pad=20,
+                  fontsize=14,
+                  color='black',
+                  linespacing=1.3,
+                  ha='center',
+                  x=0.5)
+
+        # Adjust layout
+        plt.subplots_adjust(top=0.9, bottom=0.15, left=0.1, right=0.9)
 
         # Add titles with appropriate sizing
-        plt.title(f'Confusion Matrix - {self.experiment_name}\nEpoch {epoch}',
-                  pad=20, fontsize=14, color='black')
         plt.xlabel('Predicted Label', labelpad=15, color='black', fontsize=12)
         plt.ylabel('True Label', labelpad=15, color='black', fontsize=12)
 
@@ -281,8 +331,7 @@ class Trainer:
                     pad_inches=0.5)
         plt.close()
 
-    def plot_metrics(self):
-        """Plot metrics with path checking"""
+    def plot_metrics(self, epoch=None):
         metric_pairs = [
             ('accuracy', 'Accuracy'),
             (('precision_macro', 'precision_micro'), 'Precision (Macro vs Micro)'),
@@ -290,65 +339,149 @@ class Trainer:
             (('f1_macro', 'f1_micro'), 'F1 (Macro vs Micro)')
         ]
 
-        plt.figure(figsize=(20, 15), facecolor='white')
+        # Consistent figure size across all plots
+        fig = plt.figure(figsize=(16, 12), facecolor='white')
+
+        # Title formatting
+        current_epoch = len(self.metrics_history)
+        if epoch is None or epoch == 'latest':
+            title_lines = [
+                'Training Metrics (Latest)',
+                f'{self.experiment_name}',
+                f'Epoch {current_epoch}/{self.config.training_settings.num_epochs}'
+            ]
+        else:
+            title_lines = [
+                'Training Metrics (Checkpoint)',
+                f'{self.experiment_name}',
+                f'Epoch {epoch}/{self.config.training_settings.num_epochs}'
+            ]
+
+        # Centered suptitle with consistent styling
+        fig.suptitle('\n'.join(title_lines),
+                     y=0.95,
+                     fontsize=16,
+                     color='black',
+                     linespacing=1.2)
+
+        # Optimized subplot layout
+        plt.subplots_adjust(
+            top=0.85,
+            bottom=0.10,
+            left=0.10,
+            right=0.95,
+            hspace=0.30,
+            wspace=0.25
+        )
 
         for i, (metric, title) in enumerate(metric_pairs, 1):
-            plt.subplot(2, 2, i)
-            ax = plt.gca()
+            ax = fig.add_subplot(2, 2, i)
             ax.set_facecolor('white')
 
             if isinstance(metric, tuple):
-                # Plot macro and micro metrics together
-                for m, style in zip(metric, ['-o', '--s']):
+                for m, (linestyle, marker) in zip(metric, [('-', 'o'), ('--', 's')]):
                     train_metric = [h[f'train_{m}']
                                     for h in self.metrics_history]
                     val_metric = [h[f'val_{m}'] for h in self.metrics_history]
-                    label_suffix = '(Macro)' if 'macro' in m else '(Micro)'
-                    plt.plot(train_metric, style, label=f'Train {label_suffix}',
-                             markersize=4, color='blue' if 'macro' in m else 'red')
-                    plt.plot(val_metric, style, label=f'Val {label_suffix}',
-                             markersize=4, color='lightblue' if 'macro' in m else 'lightcoral')
+
+                    if 'macro' in m:
+                        ax.plot(train_metric, linestyle=linestyle, marker=marker,
+                                label=f'Train (Macro)', color='#1f77b4',
+                                markersize=3, linewidth=1.2)  # Smaller markers
+                        ax.plot(val_metric, linestyle=linestyle, marker=marker,
+                                label=f'Val (Macro)', color='#7cc7ff',
+                                markersize=3, linewidth=1.2)
+                    else:
+                        ax.plot(train_metric, linestyle=linestyle, marker=marker,
+                                label=f'Train (Micro)', color='#d62728',
+                                markersize=3, linewidth=1.2)
+                        ax.plot(val_metric, linestyle=linestyle, marker=marker,
+                                label=f'Val (Micro)', color='#ff9999',
+                                markersize=3, linewidth=1.2)
             else:
-                # Plot single metric
                 train_metric = [h[f'train_{metric}']
                                 for h in self.metrics_history]
                 val_metric = [h[f'val_{metric}'] for h in self.metrics_history]
-                plt.plot(train_metric, '-o', label='Train',
-                         markersize=4, color='blue')
-                plt.plot(val_metric, '--s', label='Val',
-                         markersize=4, color='lightblue')
+                ax.plot(train_metric, '-o', label='Train', color='#1f77b4',
+                        markersize=3, linewidth=1.2)
+                ax.plot(val_metric, '-o', label='Val', color='#7cc7ff',
+                        markersize=3, linewidth=1.2)
 
-            plt.title(title, color='black', pad=10)
-            plt.xlabel('Epoch', color='black')
-            plt.ylabel('Score', color='black')
-            plt.grid(True, linestyle='--', alpha=0.3, color='gray')
+            # Enhanced subplot customization
+            ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+            ax.set_ylim(0.65, 1.0)  # Adjusted y-axis range for better detail
+            ax.set_yticks(np.arange(0.65, 1.05, 0.05))  # More detailed y-ticks
+            ax.grid(True, linestyle='--', alpha=0.2,
+                    color='gray')  # Lighter grid
 
-            # Set legend with black text
-            legend = plt.legend(facecolor='white', edgecolor='black')
+            # Consistent font sizes and styling
+            ax.set_title(title, color='black', pad=10, fontsize=14)
+            ax.set_xlabel('Epoch', color='black', fontsize=12)
+            ax.set_ylabel('Score', color='black', fontsize=12)
+            ax.tick_params(colors='black', width=1.0, labelsize=10)
+
+            # Scientific and clean legend styling
+            if isinstance(metric, tuple):
+                legend = ax.legend(
+                    facecolor='white',
+                    edgecolor='none',
+                    fontsize=8,  # Smaller font size
+                    loc='upper right',
+                    bbox_to_anchor=(0.99, 0.99),  # Precise positioning
+                    framealpha=0.8,
+                    ncol=2,  # Two columns for macro/micro metrics
+                    columnspacing=1.0,
+                    handlelength=1.2,  # Shorter lines
+                    handletextpad=0.4,  # Less space between marker and text
+                    markerscale=0.8,   # Slightly smaller markers
+                    borderaxespad=0.2   # Less padding around legend
+                )
+            else:
+                # For accuracy plot (simpler legend)
+                legend = ax.legend(
+                    facecolor='white',
+                    edgecolor='none',
+                    fontsize=8,
+                    loc='upper right',
+                    bbox_to_anchor=(0.99, 0.99),
+                    framealpha=0.8,
+                    handlelength=1.2,
+                    handletextpad=0.4,
+                    markerscale=0.8,
+                    borderaxespad=0.2
+                )
+
             plt.setp(legend.get_texts(), color='black')
+            legend.get_frame().set_linewidth(0)  # Remove edge
 
-            # Set spine colors to black
-            for spine in ax.spines.values():
-                spine.set_color('black')
+            # Ensure plot elements don't overlap
+            ax.margins(x=0.02, y=0.02)  # Tighter margins
 
-            # Set tick colors to black
-            ax.tick_params(colors='black')
+        # Adjust subplot spacing to accommodate legend
+        plt.subplots_adjust(
+            top=0.85,
+            bottom=0.10,
+            left=0.10,
+            right=0.85,    # Increased right margin significantly to make room for legend
+            hspace=0.35,
+            wspace=0.35
+        )
 
-        plt.suptitle(f'Training Metrics - {self.experiment_name}',
-                     color='black', fontsize=16, y=1.02)
-        plt.tight_layout()
+        # Important: DO NOT use tight_layout() as it can interfere with suptitle
+        plt.subplots_adjust(top=0.85, bottom=0.1,
+                            left=0.1, right=0.9,
+                            hspace=0.35, wspace=0.35)
 
-        # Ensure directories exist
+        # Save plots without bbox_inches parameter
         base_path = os.path.join(self.results_dir, 'figures')
         latest_figures_dir = os.path.join(base_path, 'latest')
         self._ensure_dir_exists(base_path)
         self._ensure_dir_exists(latest_figures_dir)
 
-        # Save both versions
         plt.savefig(os.path.join(base_path, f'metrics_plot_{self.experiment_name}.png'),
-                    bbox_inches='tight', dpi=300, facecolor='white')
+                    dpi=300, facecolor='white')
         plt.savefig(os.path.join(latest_figures_dir, f'metrics_plot_{self.experiment_name}.png'),
-                    bbox_inches='tight', dpi=300, facecolor='white')
+                    dpi=300, facecolor='white')
         plt.close()
 
     def plot_class_performance(self, y_true, y_pred, epoch):
@@ -390,12 +523,38 @@ class Trainer:
         # Style improvements with black text
         plt.yticks(x, metrics_df['Class'], color='black')
         plt.xlabel('Score', color='black')
-        plt.title(f'Per-class Performance - {self.experiment_name}\nEpoch {epoch}',
-                  color='black')
 
-        # Set legend with black text
-        legend = plt.legend(facecolor='white', edgecolor='black')
-        # Set legend text color to black
+        # Enhanced title with better spacing and formatting
+        if epoch == 'latest':
+            current_epoch = len(self.metrics_history)
+            title_lines = [
+                'Per-class Performance (Latest)',
+                f'{self.experiment_name}',
+                f'Epoch {current_epoch}/{self.config.training_settings.num_epochs}'
+            ]
+        else:
+            title_lines = [
+                'Per-class Performance (Checkpoint)',
+                f'{self.experiment_name}',
+                f'Epoch {epoch}/{self.config.training_settings.num_epochs}'
+            ]
+
+        plt.title('\n'.join(title_lines),
+                  pad=20,
+                  fontsize=14,
+                  color='black',
+                  linespacing=1.3,
+                  ha='center',      # Ensure horizontal center alignment
+                  x=0.5)           # Set x position to center
+
+        # Set legend with black text in upper right
+        legend = plt.legend(
+            facecolor='white',
+            edgecolor='black',
+            loc='upper right',         # Ensure legend is at upper right
+            fontsize=10,
+            bbox_to_anchor=(1.0, 1.0)  # Fine-tune position
+        )
         plt.setp(legend.get_texts(), color='black')
 
         # Add support numbers
@@ -412,7 +571,8 @@ class Trainer:
         # Set tick colors to black
         ax.tick_params(colors='black')
 
-        plt.tight_layout()
+        # Adjust layout
+        plt.subplots_adjust(top=0.85, bottom=0.1, left=0.15, right=0.95)
 
         # Ensure directories exist
         base_path = os.path.join(self.results_dir, 'figures')
@@ -484,7 +644,7 @@ class Trainer:
             self.plot_class_performance(val_labels, val_preds, 'latest')
             self.save_metrics(train_metrics, 'latest', 'train')
             self.save_metrics(val_metrics, 'latest', 'val')
-            self.plot_metrics()
+            self.plot_metrics(epoch=None)  # This will go to latest directory
 
             # Periodic checkpoint saving remains the same
             if (epoch + 1) % self.config.training_settings.checkpoint_freq == 0:
@@ -511,6 +671,8 @@ class Trainer:
                 self.plot_class_performance(val_labels, val_preds, epoch + 1)
                 self.save_metrics(train_metrics, epoch + 1, 'train')
                 self.save_metrics(val_metrics, epoch + 1, 'val')
+                # This will go to numbered checkpoint
+                self.plot_metrics(epoch=epoch+1)
 
             # Best model saving logic
             is_best = val_metrics['loss'] < self.best_val_loss

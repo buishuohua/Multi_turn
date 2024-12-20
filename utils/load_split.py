@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*- 
+# -*- coding: utf-8 -*-
 
 """
     @ __Author__ = Yunkai.Gao
@@ -10,13 +10,23 @@
 import os
 
 import numpy as np
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 import ast
 import pandas as pd
 from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import train_test_split
 from .truncate import truncate
 import torch
+from imblearn.over_sampling import (
+    RandomOverSampler, SMOTE, ADASYN,
+    BorderlineSMOTE, SVMSMOTE
+)
+from imblearn.under_sampling import (
+    RandomUnderSampler, TomekLinks,
+    EditedNearestNeighbours, ClusterCentroids,
+    NearMiss, InstanceHardnessThreshold
+)
+from collections import Counter
 
 
 def _loader_data():
@@ -51,48 +61,99 @@ def _loader_data():
     return data
 
 
-def train_val_test_split(data, train_size, val_size, test_size, type, random_state):
-    """Split data preserving both tokenized and truncated columns"""
-    if abs(train_size + val_size + test_size - 1.0) > 1e-7:
-        raise ValueError("Train, validation, and test sizes must sum to 1")
+def handle_imbalanced_data(X, y, config):
+    if config.data_settings.use_weighted_sampler:
+        class_counts = Counter(y)
+        weights = {cls: 1.0/count for cls, count in class_counts.items()}
+        sample_weights = torch.DoubleTensor([weights[label] for label in y])
+        sampler = WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=len(sample_weights),
+            replacement=True
+        )
+        return X, y, sampler
 
+    if config.data_settings.oversample:
+        if config.data_settings.oversample_strategy == 'random':
+            sampler = RandomOverSampler(
+                random_state=config.data_settings.random_state)
+        elif config.data_settings.oversample_strategy == 'smote':
+            sampler = SMOTE(
+                k_neighbors=config.data_settings.smote_k_neighbors,
+                random_state=config.data_settings.random_state
+            )
+        elif config.data_settings.oversample_strategy == 'adasyn':
+            sampler = ADASYN(random_state=config.data_settings.random_state)
+        elif config.data_settings.oversample_strategy == 'borderline1':
+            sampler = BorderlineSMOTE(
+                k_neighbors=config.data_settings.smote_k_neighbors,
+                random_state=config.data_settings.random_state,
+                kind='borderline-1'
+            )
+        elif config.data_settings.oversample_strategy == 'borderline2':
+            sampler = BorderlineSMOTE(
+                k_neighbors=config.data_settings.smote_k_neighbors,
+                random_state=config.data_settings.random_state,
+                kind='borderline-2'
+            )
+        elif config.data_settings.oversample_strategy == 'svm_smote':
+            sampler = SVMSMOTE(
+                k_neighbors=config.data_settings.smote_k_neighbors,
+                random_state=config.data_settings.random_state
+            )
+        X_resampled, y_resampled = sampler.fit_resample(X, y)
+        return X_resampled, y_resampled, None
+
+    if config.data_settings.undersample:
+        if config.data_settings.undersample_strategy == 'random':
+            sampler = RandomUnderSampler(
+                random_state=config.data_settings.random_state)
+        elif config.data_settings.undersample_strategy == 'tomek':
+            sampler = TomekLinks()
+        elif config.data_settings.undersample_strategy == 'edited_nearest_neighbors':
+            sampler = EditedNearestNeighbours()
+        elif config.data_settings.undersample_strategy == 'cluster_centroids':
+            sampler = ClusterCentroids(
+                random_state=config.data_settings.random_state)
+        elif config.data_settings.undersample_strategy == 'near_miss':
+            sampler = NearMiss()
+        elif config.data_settings.undersample_strategy == 'instance_hardness_threshold':
+            sampler = InstanceHardnessThreshold(
+                random_state=config.data_settings.random_state)
+        X_resampled, y_resampled = sampler.fit_resample(X, y)
+        return X_resampled, y_resampled, None
+
+    return X, y, None
+
+
+def train_val_test_split(data, config):
     y = data["category"]
-    # Keep both tokenized and truncated columns
-    X = data[[f"{type}_tokenized", f"{type}_truncated"]]
-
-    remaining_size = train_size + val_size
-    test_ratio = test_size / (test_size + remaining_size)
+    X = data[[f"{config.data_settings.which}_tokenized",
+              f"{config.data_settings.which}_truncated"]]
 
     X_temp, X_test, y_temp, y_test = train_test_split(
         X, y,
-        test_size=test_ratio,
+        test_size=config.data_settings.test_size,
         stratify=y,
-        random_state=random_state,
-        shuffle=True
+        random_state=config.data_settings.random_state
     )
 
-    val_ratio = val_size / (train_size + val_size)
-
+    val_ratio = config.data_settings.val_size / \
+        (config.data_settings.train_size + config.data_settings.val_size)
     X_train, X_val, y_train, y_val = train_test_split(
         X_temp, y_temp,
         test_size=val_ratio,
         stratify=y_temp,
-        random_state=random_state,
-        shuffle=True
+        random_state=config.data_settings.random_state
     )
 
     return X_train, X_val, X_test, y_train, y_val, y_test
 
 
 def loader(config):
-    """Create train, validation and test dataloaders"""
-    # Load data
     data = _loader_data()
 
-    # Get tokenizer and apply truncation
     tokenizer = config.tokenizer_settings.get_model().tokenizer
-
-    # Apply truncation first
     data = truncate(
         data=data,
         tokenizer=tokenizer,
@@ -101,51 +162,54 @@ def loader(config):
         method=config.tokenizer_settings.truncation
     )
 
-    # Convert categories to numbers
     label_encoder = LabelEncoder()
-    encoded_labels = label_encoder.fit_transform(data['category'])
+    data['category'] = label_encoder.fit_transform(data['category'])
 
-    # Split data
     X_train, X_val, X_test, y_train, y_val, y_test = train_val_test_split(
-        data,
-        train_size=config.data_settings.train_size,
-        val_size=config.data_settings.val_size,
-        test_size=config.data_settings.test_size,
-        type=config.data_settings.which,
-        random_state=config.data_settings.random_state
+        data, config)
+
+    # Convert pandas Series to numpy arrays
+    X_train_tokenized = np.array(
+        X_train[f"{config.data_settings.which}_tokenized"].tolist())
+    y_train = np.array(y_train)
+    y_val = np.array(y_val)
+    y_test = np.array(y_test)
+
+    # Handle imbalanced data
+    X_train_resampled, y_train_resampled, sampler = handle_imbalanced_data(
+        X_train_tokenized, y_train, config
     )
 
-    # Create datasets directly from tokenized data
+    # Create datasets with numpy arrays
     train_dataset = TensorDataset(
-        torch.tensor(X_train[f"{config.data_settings.which}_tokenized"].tolist(), dtype=torch.long),
-        torch.tensor(label_encoder.transform(y_train), dtype=torch.long)
+        torch.tensor(X_train_resampled, dtype=torch.long),
+        torch.tensor(y_train_resampled, dtype=torch.long)
     )
-
     val_dataset = TensorDataset(
-        torch.tensor(X_val[f"{config.data_settings.which}_tokenized"].tolist(), dtype=torch.long),
-        torch.tensor(label_encoder.transform(y_val), dtype=torch.long)
+        torch.tensor(
+            X_val[f"{config.data_settings.which}_tokenized"].tolist(), dtype=torch.long),
+        torch.tensor(y_val, dtype=torch.long)
     )
-
     test_dataset = TensorDataset(
-        torch.tensor(X_test[f"{config.data_settings.which}_tokenized"].tolist(), dtype=torch.long),
-        torch.tensor(label_encoder.transform(y_test), dtype=torch.long)
+        torch.tensor(
+            X_test[f"{config.data_settings.which}_tokenized"].tolist(), dtype=torch.long),
+        torch.tensor(y_test, dtype=torch.long)
     )
 
     # Create dataloaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=config.training_settings.batch_size,
-        shuffle=config.data_settings.shuffle,
+        shuffle=config.data_settings.shuffle if sampler is None else False,
+        sampler=sampler,
         drop_last=config.data_settings.drop_last
     )
-
     val_loader = DataLoader(
         val_dataset,
         batch_size=config.training_settings.batch_size,
         shuffle=False,
         drop_last=config.data_settings.drop_last
     )
-
     test_loader = DataLoader(
         test_dataset,
         batch_size=config.training_settings.batch_size,
