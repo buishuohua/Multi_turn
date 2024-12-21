@@ -13,6 +13,8 @@ from abc import ABC, abstractmethod
 from typing import Tuple, Optional, Dict, Any, List, TYPE_CHECKING
 import math
 import torch.nn.functional as F
+import os
+import re
 
 if TYPE_CHECKING:
     from config.Experiment_Config import ExperimentConfig
@@ -31,7 +33,7 @@ class BaseLSTM(nn.Module, ABC):
         self.config = config
 
         # Get embedding model
-        self.embedding_model = config.tokenizer_settings.get_model().model
+        self.embedding_model = self._load_or_create_embedding_model()
         if not config.model_settings.fine_tune_embedding:
             for param in self.embedding_model.parameters():
                 param.requires_grad = False
@@ -50,6 +52,46 @@ class BaseLSTM(nn.Module, ABC):
 
         # Initialize weights after creating layers
         self._initialize_weights()
+
+    def _load_or_create_embedding_model(self):
+        """Load fine-tuned embedding model if exists, otherwise create new"""
+        if self.config.model_settings.fine_tune_embedding:
+            # Define paths
+            fine_tuned_dir = os.path.join(
+                self.config.training_settings.fine_tuned_models_dir,
+                self.config.model_settings.embedding_type
+            )
+            checkpoints_dir = os.path.join(fine_tuned_dir, 'checkpoints')
+
+            # Create new embedding model
+            embedding_model = self.config.tokenizer_settings.get_model().model
+
+            # Check for existing checkpoints
+            if os.path.exists(checkpoints_dir):
+                checkpoint_files = [f for f in os.listdir(
+                    checkpoints_dir) if f.endswith('.pt')]
+                if checkpoint_files:
+                    latest_epoch = max([int(re.search(r'epoch_(\d+)\.pt$', f).group(1))
+                                        for f in checkpoint_files if re.search(r'epoch_(\d+)\.pt$', f)])
+
+                    checkpoint_path = os.path.join(
+                        checkpoints_dir, f'embedding_model_epoch_{latest_epoch}.pt')
+                    try:
+                        checkpoint = torch.load(checkpoint_path)
+                        state_dict = checkpoint.get('state_dict', checkpoint)
+                        embedding_model.load_state_dict(state_dict)
+                        print(
+                            f"\n[Fine-tuning] Loaded embedding model from epoch {latest_epoch}")
+                    except Exception as e:
+                        print(
+                            f"\n[Fine-tuning] Warning: Using fresh embedding model ({str(e)})")
+            else:
+                print("\n[Fine-tuning] Starting with fresh embedding model")
+
+            return embedding_model
+
+        # If not fine-tuning
+        return self.config.tokenizer_settings.get_model().model
 
     def _create_attention(self) -> nn.Module:
         """Create attention layer based on configuration"""

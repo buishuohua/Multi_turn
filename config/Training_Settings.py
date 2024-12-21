@@ -44,6 +44,9 @@ class TrainingSettings:
     # Hardware settings
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
 
+    # Directory for fine-tuned embedding models
+    fine_tuned_models_dir: str = "fine_tuned_models"
+
     def __post_init__(self):
         """Validate settings after initialization and auto-detect continue_training"""
         if self.num_epochs <= 0:
@@ -81,9 +84,6 @@ class TrainingSettings:
 
         # If we found checkpoints and haven't completed all epochs, continue training
         should_continue = latest_epoch > 0 and latest_epoch < self.num_epochs
-        if should_continue:
-            print(f"Found existing checkpoint at epoch {latest_epoch}/{self.num_epochs}. "
-                  f"Training will continue from the latest checkpoint.")
         return should_continue
 
     def get_optimizer(self, model_parameters) -> torch.optim.Optimizer:

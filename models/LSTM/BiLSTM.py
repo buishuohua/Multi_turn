@@ -12,9 +12,19 @@ import torch
 import torch.nn as nn
 from typing import Tuple, Optional, Dict, Any, List
 from config.Experiment_Config import ExperimentConfig
+import torch.nn.functional as F
 
 
 class BiLSTM(BaseLSTM):
+    """
+    Bidirectional LSTM with attention mechanism.
+
+    Features:
+    - Multiple LSTM layers with decreasing hidden sizes
+    - Attention mechanism for sequence representation
+    - Dropout regularization
+    """
+
     def __init__(self, config: ExperimentConfig):
         """
         Bidirectional LSTM implementation
@@ -29,15 +39,15 @@ class BiLSTM(BaseLSTM):
                 hidden: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None) -> Tuple[
             torch.Tensor, List[Tuple[torch.Tensor, torch.Tensor]]]:
         """
-        Forward pass implementation
+        Forward pass with attention
 
         Args:
             x: Input tensor of shape (batch_size, sequence_length)
             hidden: Optional initial hidden states for each layer
 
         Returns:
-            output: Model output
-            hidden_states: List of (h_n, c_n) for each layer
+            output: Model output after attention and FC layers
+            hidden_states: List of final hidden states for each layer
         """
         batch_size = x.size(0)
 
@@ -55,26 +65,43 @@ class BiLSTM(BaseLSTM):
         # Process through LSTM layers
         current_hidden_states = []
         for i, lstm_layer in enumerate(self.lstm):
-            # Process current layer
             x, (h_n, c_n) = lstm_layer(x, hidden[i])
             current_hidden_states.append((h_n, c_n))
 
-            # Apply dropout between layers (except last layer)
             if i < len(self.lstm) - 1:
                 x = self.dropout(x)
 
-        # Apply pooling strategy
-        if self.config.model_settings.pooling == 'last':
-            # Take the last time step
-            x = x[:, -1, :]
-        else:  # 'mean' pooling
-            # Average across all time steps
-            x = torch.mean(x, dim=1)
+        # Apply attention to get weighted sequence representation
+        if self.attention is not None:
+            # x shape: (batch_size, seq_len, hidden_size)
+            attended_seq = self.apply_attention(x)
 
-        # Final dropout before FC layer
+            # If using multi-head attention, the output maintains sequence length
+            if isinstance(self.attention, nn.MultiheadAttention):
+                if self.config.model_settings.pooling == 'mean':
+                    # (batch_size, hidden_size)
+                    x = torch.mean(attended_seq, dim=1)
+                elif self.config.model_settings.pooling == 'last':
+                    x = attended_seq[:, -1, :]  # Take the last hidden state
+                else:
+                    raise ValueError(
+                        f"Unknown pooling type: {self.config.model_settings.pooling}")
+            else:
+                # For other attention types, reshape if needed
+                # Flatten to (batch_size, hidden_size)
+                x = attended_seq.view(batch_size, -1)
+        else:
+            # If no attention, apply pooling based on configuration
+            if self.config.model_settings.pooling == 'mean':
+                x = torch.mean(x, dim=1)  # (batch_size, hidden_size)
+            elif self.config.model_settings.pooling == 'last':
+                x = x[:, -1, :]  # Take the last hidden state
+            else:
+                raise ValueError(
+                    f"Unknown pooling type: {self.config.model_settings.pooling}")
+
+        # Final dropout and FC layers
         x = self.dropout(x)
-
-        # Pass through fully connected layers
         output = self.fc_layers(x)
 
         return output, current_hidden_states
@@ -87,7 +114,6 @@ class BiLSTM(BaseLSTM):
             'bidirectional': self.config.model_settings.bidirectional,
             'num_layers': len(self.lstm),
             'hidden_dims': self.config.model_settings.hidden_dims,
-            'pooling_strategy': self.config.model_settings.pooling,
             'dropout_rate': self.config.model_settings.dropout_rate
         })
         return info
