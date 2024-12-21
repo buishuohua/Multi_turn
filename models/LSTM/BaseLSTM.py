@@ -11,6 +11,8 @@ import torch
 import torch.nn as nn
 from abc import ABC, abstractmethod
 from typing import Tuple, Optional, Dict, Any, List, TYPE_CHECKING
+import math
+import torch.nn.functional as F
 
 if TYPE_CHECKING:
     from config.Experiment_Config import ExperimentConfig
@@ -38,14 +40,67 @@ class BaseLSTM(nn.Module, ABC):
         self.final_activation = config.model_settings.get_final_activation()
         self.dropout = nn.Dropout(config.model_settings.dropout_rate)
         self.lstm = self._create_lstm()
+
+        # Add attention layer if enabled
+        self.attention = None
+        if config.model_settings.use_attention:
+            self.attention = self._create_attention()
+
         self.fc_layers = self._create_fc_layers()
 
         # Initialize weights after creating layers
         self._initialize_weights()
 
+    def _create_attention(self) -> nn.Module:
+        """Create attention layer based on configuration"""
+        config = self.config.model_settings
+        hidden_size = config.hidden_dims[-1] * \
+            (2 if config.bidirectional else 1)
+
+        if config.attention_type == 'dot':
+            return nn.Linear(hidden_size, hidden_size)  # Simple dot attention
+
+        elif config.attention_type == 'general':
+            return nn.Sequential(
+                nn.Linear(hidden_size, config.attention_dim),
+                nn.Tanh(),
+                nn.Linear(config.attention_dim, hidden_size)
+            )
+
+        elif config.attention_type == 'concat':
+            return nn.Sequential(
+                nn.Linear(hidden_size * 2, config.attention_dim),
+                nn.Tanh(),
+                nn.Linear(config.attention_dim, 1)
+            )
+
+        elif config.attention_type == 'scaled_dot':
+            class ScaledDotAttention(nn.Module):
+                def __init__(self, dim, temperature=1.0):
+                    super().__init__()
+                    self.scale = temperature * math.sqrt(dim)
+
+                def forward(self, x):
+                    # x shape: (batch, seq_len, hidden_size)
+                    attention = torch.bmm(x, x.transpose(1, 2)) / self.scale
+                    attention = F.softmax(attention, dim=-1)
+                    return torch.bmm(attention, x)
+
+            return ScaledDotAttention(hidden_size, config.attention_temperature)
+
+        elif config.attention_type == 'multi_head':
+            return nn.MultiheadAttention(
+                embed_dim=hidden_size,
+                num_heads=config.num_attention_heads,
+                dropout=config.attention_dropout,
+                batch_first=True
+            )
+        else:
+            raise ValueError(
+                f"Unknown attention type: {config.attention_type}")
+
     def _create_lstm(self) -> nn.Module:
         """Create LSTM layer with different hidden sizes for each layer"""
-        # Create a list of LSTM layers with different hidden sizes
         lstm_layers = []
         input_size = self.config.model_settings.embedding_dim
 
@@ -53,13 +108,12 @@ class BaseLSTM(nn.Module, ABC):
             lstm_layer = nn.LSTM(
                 input_size=input_size,
                 hidden_size=hidden_size,
-                num_layers=1,  # Each LSTM layer has 1 layer
+                num_layers=1,
                 batch_first=True,
                 bidirectional=self.config.model_settings.bidirectional,
-                dropout=0  # Dropout will be handled between layers
+                dropout=0
             )
             lstm_layers.append(lstm_layer)
-            # Next layer's input size is current hidden_size * 2 if bidirectional
             input_size = hidden_size * \
                 (2 if self.config.model_settings.bidirectional else 1)
 
@@ -67,7 +121,6 @@ class BaseLSTM(nn.Module, ABC):
 
     def _create_fc_layers(self) -> nn.Module:
         """Create fully connected layers"""
-        # Use the last LSTM layer's hidden size
         last_hidden_size = self.config.model_settings.hidden_dims[-1] * (
             2 if self.config.model_settings.bidirectional else 1)
 
@@ -75,6 +128,30 @@ class BaseLSTM(nn.Module, ABC):
             nn.Linear(last_hidden_size, self.config.model_settings.output_dim),
             self.final_activation if self.final_activation is not None else nn.Identity()
         )
+
+    def apply_attention(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply attention mechanism to the input tensor"""
+        if self.attention is None:
+            return x
+
+        if isinstance(self.attention, nn.MultiheadAttention):
+            x, _ = self.attention(x, x, x)
+        else:
+            # For other attention types
+            if self.config.model_settings.attention_type == 'dot':
+                scores = torch.bmm(x, self.attention(x).transpose(1, 2))
+                attention = F.softmax(scores, dim=-1)
+                x = torch.bmm(attention, x)
+            elif self.config.model_settings.attention_type in ['general', 'concat']:
+                attention_weights = self.attention(x)
+                if self.config.model_settings.attention_type == 'concat':
+                    attention_weights = attention_weights.squeeze(-1)
+                attention_weights = F.softmax(attention_weights, dim=1)
+                x = torch.bmm(attention_weights.unsqueeze(1), x).squeeze(1)
+            else:  # scaled_dot
+                x = self.attention(x)
+
+        return x
 
     def init_hidden(self, batch_size: int) -> List[Tuple[torch.Tensor, torch.Tensor]]:
         """Initialize hidden states for each LSTM layer"""
@@ -95,13 +172,24 @@ class BaseLSTM(nn.Module, ABC):
 
     def get_model_info(self) -> Dict[str, Any]:
         """Get model information for logging"""
-        info = super().get_model_info()
-        # Add initialization info
-        info.update({
-            'weight_initialization': self.config.model_settings.weight_init,
-            'init_gain': self.config.model_settings.init_gain,
-            'init_std': self.config.model_settings.init_std
-        })
+        info = {
+            'embedding_type': self.config.model_settings.embedding_type,
+            'embedding_dim': self.config.model_settings.embedding_dim,
+            'hidden_dims': self.config.model_settings.hidden_dims,
+            'bidirectional': self.config.model_settings.bidirectional,
+            'dropout_rate': self.config.model_settings.dropout_rate,
+            'num_layers': len(self.lstm),
+            'use_attention': self.config.model_settings.use_attention
+        }
+
+        if self.config.model_settings.use_attention:
+            info.update({
+                'attention_type': self.config.model_settings.attention_type,
+                'attention_heads': self.config.model_settings.num_attention_heads,
+                'attention_dim': self.config.model_settings.attention_dim,
+                'attention_dropout': self.config.model_settings.attention_dropout
+            })
+
         return info
 
     def _initialize_weights(self):

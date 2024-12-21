@@ -130,10 +130,11 @@ class Trainer:
         model_type = self.config.model_selection.model_type
         tokenizer_name = self.config.tokenizer_settings.name
         layers = self.config.model_settings.num_layers
-        loss_function = self.config.model_settings.loss_function
+        loss_function = self.config.model_settings.loss
         imbalanced_strategy = self.config.data_settings.imbalanced_strategy
-        initial_strategy = self.config.data_settings.initial_strategy
-        return f"{model_type}_{tokenizer_name}_l{layers}_{loss_function}_{initial_strategy}_{imbalanced_strategy}"
+        initial_strategy = self.config.model_settings.weight_init
+        max_length = self.config.tokenizer_settings.max_length
+        return f"{model_type}_{tokenizer_name}_{max_length}_{layers}_{loss_function}_{initial_strategy}_{imbalanced_strategy}"
 
     def load_checkpoint(self, checkpoint_path=None):
         """Load checkpoint with enhanced fallback strategy"""

@@ -13,6 +13,7 @@ import torch.nn as nn
 import torch
 from transformers import AutoConfig
 
+
 @dataclass
 class ModelSettings:
     """Model architecture settings"""
@@ -56,6 +57,15 @@ class ModelSettings:
     # Class weights for weighted losses
     class_weights: Optional[List[float]] = None
 
+    # Add new attention-related parameters
+    use_attention: bool = False
+    attention_type: Literal['dot', 'general', 'concat',
+                            'scaled_dot', 'multi_head'] = 'scaled_dot'
+    attention_dim: Optional[int] = None  # Will default to hidden_dim if None
+    num_attention_heads: int = 8  # For multi-head attention
+    attention_dropout: float = 0.1
+    attention_temperature: float = 1.0  # Scaling factor for attention scores
+
     def __post_init__(self):
         """Validate settings after initialization"""
         # First validate and set embedding dimension
@@ -76,6 +86,13 @@ class ModelSettings:
 
         if self.output_dim is not None and self.output_dim <= 0:
             raise ValueError("output_dim must be positive")
+
+        # Set attention dimension if not provided
+        if self.use_attention and self.attention_dim is None:
+            self.attention_dim = self.init_hidden_dim
+
+        # Validate attention settings
+        self._validate_attention_settings()
 
     def _get_model_name(self) -> str:
         """Convert embedding type to huggingface model name"""
@@ -246,6 +263,44 @@ class ModelSettings:
         }
         return init_config
 
+    def _validate_attention_settings(self):
+        """Validate attention-related settings"""
+        if self.use_attention:
+            errors = []
+
+            if self.attention_type == 'multi_head':
+                if self.num_attention_heads <= 0:
+                    errors.append("num_attention_heads must be positive")
+                if self.attention_dim % self.num_attention_heads != 0:
+                    errors.append(
+                        "attention_dim must be divisible by num_attention_heads")
+
+            if self.attention_dim <= 0:
+                errors.append("attention_dim must be positive")
+
+            if not 0 <= self.attention_dropout <= 1:
+                errors.append("attention_dropout must be between 0 and 1")
+
+            if self.attention_temperature <= 0:
+                errors.append("attention_temperature must be positive")
+
+            if errors:
+                raise ValueError("\n".join(errors))
+
+    def get_attention_config(self) -> Dict:
+        """Return attention configuration"""
+        if not self.use_attention:
+            return {'use_attention': False}
+
+        return {
+            'use_attention': True,
+            'type': self.attention_type,
+            'dim': self.attention_dim,
+            'num_heads': self.num_attention_heads,
+            'dropout': self.attention_dropout,
+            'temperature': self.attention_temperature
+        }
+
     @classmethod
     def get_default(cls):
         return cls(
@@ -270,5 +325,12 @@ class ModelSettings:
             focal_alpha=1.0,
             focal_gamma=2.0,
             label_smoothing=0.1,
-            class_weights=None
+            class_weights=None,
+            # Default attention settings
+            use_attention=False,
+            attention_type='scaled_dot',
+            attention_dim=None,
+            num_attention_heads=8,
+            attention_dropout=0.1,
+            attention_temperature=1.0
         )
