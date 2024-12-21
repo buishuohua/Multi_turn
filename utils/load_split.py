@@ -62,9 +62,18 @@ def _loader_data():
 
 
 def handle_imbalanced_data(X, y, config):
-    if config.data_settings.use_weighted_sampler:
+    """Handle imbalanced data using the strategy specified in config"""
+    strategy = config.data_settings.imbalanced_strategy
+    params = config.data_settings.get_strategy_params()
+
+    if strategy == 'none':
+        return X, y, None
+
+    if strategy == 'weighted_sampler':
         class_counts = Counter(y)
         weights = {cls: 1.0/count for cls, count in class_counts.items()}
+        # Apply alpha parameter to adjust weights
+        weights = {cls: w ** params['alpha'] for cls, w in weights.items()}
         sample_weights = torch.DoubleTensor([weights[label] for label in y])
         sampler = WeightedRandomSampler(
             weights=sample_weights,
@@ -73,57 +82,92 @@ def handle_imbalanced_data(X, y, config):
         )
         return X, y, sampler
 
-    if config.data_settings.oversample:
-        if config.data_settings.oversample_strategy == 'random':
-            sampler = RandomOverSampler(
-                random_state=config.data_settings.random_state)
-        elif config.data_settings.oversample_strategy == 'smote':
+    if strategy == 'random_oversample':
+        sampler = RandomOverSampler(
+            random_state=config.data_settings.random_state)
+        X_resampled, y_resampled = sampler.fit_resample(X, y)
+        return X_resampled, y_resampled, None
+
+    if strategy in ['smote', 'borderline1', 'borderline2', 'svm_smote']:
+        if strategy == 'smote':
             sampler = SMOTE(
-                k_neighbors=config.data_settings.smote_k_neighbors,
+                k_neighbors=params['k_neighbors'],
+                sampling_strategy=params['sampling_ratio'],
                 random_state=config.data_settings.random_state
             )
-        elif config.data_settings.oversample_strategy == 'adasyn':
-            sampler = ADASYN(random_state=config.data_settings.random_state)
-        elif config.data_settings.oversample_strategy == 'borderline1':
+        elif strategy in ['borderline1', 'borderline2']:
             sampler = BorderlineSMOTE(
-                k_neighbors=config.data_settings.smote_k_neighbors,
+                k_neighbors=params['k_neighbors'],
+                sampling_strategy=params['sampling_ratio'],
                 random_state=config.data_settings.random_state,
-                kind='borderline-1'
+                kind=params['kind']
             )
-        elif config.data_settings.oversample_strategy == 'borderline2':
-            sampler = BorderlineSMOTE(
-                k_neighbors=config.data_settings.smote_k_neighbors,
-                random_state=config.data_settings.random_state,
-                kind='borderline-2'
-            )
-        elif config.data_settings.oversample_strategy == 'svm_smote':
+        else:  # svm_smote
             sampler = SVMSMOTE(
-                k_neighbors=config.data_settings.smote_k_neighbors,
-                random_state=config.data_settings.random_state
+                k_neighbors=params['k_neighbors'],
+                sampling_strategy=params['sampling_ratio'],
+                random_state=config.data_settings.random_state,
+                svm_estimator=params['svm_estimator']
             )
         X_resampled, y_resampled = sampler.fit_resample(X, y)
         return X_resampled, y_resampled, None
 
-    if config.data_settings.undersample:
-        if config.data_settings.undersample_strategy == 'random':
-            sampler = RandomUnderSampler(
-                random_state=config.data_settings.random_state)
-        elif config.data_settings.undersample_strategy == 'tomek':
-            sampler = TomekLinks()
-        elif config.data_settings.undersample_strategy == 'edited_nearest_neighbors':
-            sampler = EditedNearestNeighbours()
-        elif config.data_settings.undersample_strategy == 'cluster_centroids':
-            sampler = ClusterCentroids(
-                random_state=config.data_settings.random_state)
-        elif config.data_settings.undersample_strategy == 'near_miss':
-            sampler = NearMiss()
-        elif config.data_settings.undersample_strategy == 'instance_hardness_threshold':
-            sampler = InstanceHardnessThreshold(
-                random_state=config.data_settings.random_state)
+    if strategy == 'adasyn':
+        sampler = ADASYN(
+            n_neighbors=params['n_neighbors'],
+            sampling_strategy=params['sampling_ratio'],
+            random_state=config.data_settings.random_state
+        )
         X_resampled, y_resampled = sampler.fit_resample(X, y)
         return X_resampled, y_resampled, None
 
-    return X, y, None
+    if strategy == 'random_undersample':
+        sampler = RandomUnderSampler(
+            random_state=config.data_settings.random_state)
+        X_resampled, y_resampled = sampler.fit_resample(X, y)
+        return X_resampled, y_resampled, None
+
+    if strategy == 'tomek':
+        sampler = TomekLinks(sampling_strategy=params['sampling_strategy'])
+        X_resampled, y_resampled = sampler.fit_resample(X, y)
+        return X_resampled, y_resampled, None
+
+    if strategy == 'edited_nearest_neighbors':
+        sampler = EditedNearestNeighbours(
+            n_neighbors=params['n_neighbors'],
+            kind_sel=params['kind_sel']
+        )
+        X_resampled, y_resampled = sampler.fit_resample(X, y)
+        return X_resampled, y_resampled, None
+
+    if strategy == 'cluster_centroids':
+        sampler = ClusterCentroids(
+            estimator=params['estimator'],
+            voting=params['voting'],
+            random_state=config.data_settings.random_state
+        )
+        X_resampled, y_resampled = sampler.fit_resample(X, y)
+        return X_resampled, y_resampled, None
+
+    if strategy == 'near_miss':
+        sampler = NearMiss(
+            version=params['version'],
+            n_neighbors=params['n_neighbors']
+        )
+        X_resampled, y_resampled = sampler.fit_resample(X, y)
+        return X_resampled, y_resampled, None
+
+    if strategy == 'instance_hardness_threshold':
+        sampler = InstanceHardnessThreshold(
+            estimator=params['estimator'],
+            cv=params['cv'],
+            threshold=params['threshold'],
+            random_state=config.data_settings.random_state
+        )
+        X_resampled, y_resampled = sampler.fit_resample(X, y)
+        return X_resampled, y_resampled, None
+
+    raise ValueError(f"Unknown imbalanced strategy: {strategy}")
 
 
 def train_val_test_split(data, config):
