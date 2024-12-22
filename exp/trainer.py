@@ -20,6 +20,8 @@ from tqdm import tqdm
 import re
 import numpy as np
 import pandas as pd
+import time
+from datetime import timedelta
 
 if TYPE_CHECKING:
     from config.Experiment_Config import ExperimentConfig
@@ -94,6 +96,8 @@ class Trainer:
 
         # Print detailed experiment information
         self._print_experiment_info()
+
+        self.epoch_times = []  # Track time for each epoch
 
     def _set_output_dimension(self):
         """Automatically set the output dimension based on number of classes"""
@@ -184,6 +188,29 @@ class Trainer:
         if not os.path.exists(path):
             os.makedirs(path, exist_ok=True)
 
+    def _create_epoch_directories(self, epoch):
+        """Create epoch-specific directories for checkpoints, figures, and metrics"""
+        epoch_str = f"epoch_{epoch}"
+
+        # Create main epoch directories
+        epoch_model_dir = os.path.join(
+            self.model_dir, 'checkpoints', epoch_str)
+        epoch_figures_dir = os.path.join(
+            self.results_dir, 'figures', epoch_str)
+        epoch_metrics_dir = os.path.join(
+            self.results_dir, 'metrics', epoch_str)
+
+        # Create fine-tuned model directory if needed
+        if self.config.model_settings.fine_tune_embedding:
+            epoch_fine_tuned_dir = os.path.join(
+                self.fine_tuned_dir, 'checkpoints', epoch_str)
+            self._ensure_dir_exists(epoch_fine_tuned_dir)
+
+        for directory in [epoch_model_dir, epoch_figures_dir, epoch_metrics_dir]:
+            self._ensure_dir_exists(directory)
+
+        return epoch_model_dir, epoch_figures_dir, epoch_metrics_dir
+
     def save_checkpoint(self, epoch, val_loss, is_best=False):
         """Save model checkpoint with training history"""
         checkpoint = {
@@ -195,68 +222,62 @@ class Trainer:
             'config': self.config.to_dict(),
             'train_losses': self.train_losses,
             'val_losses': self.val_losses,
-            'metrics_history': self.metrics_history,
-            'latest_epoch': epoch  # Add latest epoch info directly in checkpoint
+            'metrics_history': self.metrics_history
         }
 
-        # Ensure directories exist
+        # Save latest checkpoint
         latest_dir = os.path.join(self.model_dir, 'latest')
-        checkpoints_dir = os.path.join(self.model_dir, 'checkpoints')
         self._ensure_dir_exists(latest_dir)
-        self._ensure_dir_exists(checkpoints_dir)
-
-        # Always save/update latest model
         latest_path = os.path.join(
             latest_dir, f'{self.experiment_name}_latest.pt')
         torch.save(checkpoint, latest_path)
 
-        # Save periodic checkpoint based on frequency
+        # Save periodic checkpoint in epoch-specific directory
         if (epoch + 1) % self.config.training_settings.checkpoint_freq == 0:
+            epoch_model_dir, _, _ = self._create_epoch_directories(epoch + 1)
             checkpoint_path = os.path.join(
-                checkpoints_dir, f'{self.experiment_name}_epoch_{epoch + 1}.pt'
+                epoch_model_dir,
+                f'{self.experiment_name}.pt'
             )
             torch.save(checkpoint, checkpoint_path)
             print(f"Saved checkpoint at epoch {epoch + 1}")
 
         # Save best model if needed
         if is_best:
+            best_dir = os.path.join(self.model_dir, 'best')
+            self._ensure_dir_exists(best_dir)
             best_path = os.path.join(
-                self.model_dir, f'{self.experiment_name}_best.pt')
+                best_dir, f'{self.experiment_name}_best.pt')
             torch.save(checkpoint, best_path)
             print(f"Saved best model at epoch {epoch + 1}")
-
-        # Save fine-tuned embedding model if enabled
-        if self.config.model_settings.fine_tune_embedding:
-            self._save_fine_tuned_embedding(epoch)
 
     def _save_fine_tuned_embedding(self, epoch):
         """Save fine-tuned embedding model with epoch information"""
         embedding_state = {
-            'epoch': epoch + 1,  # Save epoch number
+            'epoch': epoch + 1,
             'state_dict': self.model.embedding_model.state_dict()
         }
 
         # Save latest version
-        latest_path = os.path.join(
-            self.fine_tuned_dir,
-            'latest',
-            'embedding_model_latest.pt'
-        )
+        latest_dir = os.path.join(self.fine_tuned_dir, 'latest')
+        self._ensure_dir_exists(latest_dir)
+        latest_path = os.path.join(latest_dir, 'embedding_model_latest.pt')
         torch.save(embedding_state, latest_path)
 
-        # Save periodic checkpoint
+        # Save periodic checkpoint in epoch-specific directory
         if (epoch + 1) % self.config.training_settings.checkpoint_freq == 0:
+            _, _, _ = self._create_epoch_directories(epoch + 1)
             checkpoint_path = os.path.join(
                 self.fine_tuned_dir,
                 'checkpoints',
-                f'embedding_model_epoch_{epoch + 1}.pt'
+                f'epoch_{epoch + 1}',
+                'embedding_model.pt'
             )
             torch.save(embedding_state, checkpoint_path)
-            print(
-                f"Saved fine-tuned embedding model checkpoint at epoch {epoch + 1}")
+            print(f"Saved fine-tuned embedding model at epoch {epoch + 1}")
 
     def plot_confusion_matrix(self, y_true, y_pred, epoch, prefix='val'):
-        """Plot confusion matrix with path checking"""
+        """Plot and save confusion matrix"""
         # Compute confusion matrix
         cm = confusion_matrix(y_true, y_pred)
 
@@ -327,21 +348,26 @@ class Trainer:
         # Add more padding to prevent label cutoff
         plt.tight_layout(pad=1.1)
 
-        # Ensure directories exist and save
-        base_path = os.path.join(self.results_dir, 'figures')
-        latest_figures_dir = os.path.join(base_path, 'latest')
-        self._ensure_dir_exists(base_path)
-        self._ensure_dir_exists(latest_figures_dir)
-
-        if epoch == 'latest':
-            save_path = os.path.join(
-                latest_figures_dir, f'{prefix}_confusion_matrix_{self.experiment_name}.png')
+        # Save the plot
+        if isinstance(epoch, int):
+            # For periodic saves
+            if (epoch) % self.config.training_settings.checkpoint_freq == 0:
+                _, epoch_figures_dir, _ = self._create_epoch_directories(epoch)
+                save_path = os.path.join(
+                    epoch_figures_dir,
+                    f'{prefix}_confusion_matrix_{self.experiment_name}.png'
+                )
+                plt.savefig(save_path, bbox_inches='tight', dpi=300)
         else:
+            # For 'latest', 'best', or 'final' saves
+            figures_dir = os.path.join(self.results_dir, 'figures', epoch)
+            self._ensure_dir_exists(figures_dir)
             save_path = os.path.join(
-                base_path, f'{prefix}_confusion_matrix_{self.experiment_name}_epoch_{epoch}.png')
+                figures_dir,
+                f'{prefix}_confusion_matrix_{self.experiment_name}.png'
+            )
+            plt.savefig(save_path, bbox_inches='tight', dpi=300)
 
-        plt.savefig(save_path, bbox_inches='tight', dpi=300, facecolor='white',
-                    pad_inches=0.5)
         plt.close()
 
     def plot_metrics(self, epoch=None):
@@ -613,28 +639,55 @@ class Trainer:
         plt.savefig(save_path, bbox_inches='tight', dpi=300, facecolor='white')
         plt.close()
 
-    def train(self):
-        """Train model with option to continue from checkpoint"""
-        if self.continue_training:
-            loaded = self.load_checkpoint()
-            if loaded:
-                print(
-                    f"Continuing training from epoch {self.start_epoch + 1} / {self.config.training_settings.num_epochs}")
-            else:
-                print("No checkpoint found, starting fresh training")
-                self.start_epoch = 0
+    def _format_time(self, seconds):
+        """Convert seconds to HH:MM:SS format"""
+        return str(timedelta(seconds=int(seconds)))
 
-        self.model = self.model.to(self.config.training_settings.device)
+    def _estimate_remaining_time(self, current_epoch, avg_epoch_time):
+        """Estimate remaining training time"""
+        remaining_epochs = self.config.training_settings.num_epochs - current_epoch
+        remaining_seconds = remaining_epochs * avg_epoch_time
+        return self._format_time(remaining_seconds)
+
+    def train(self):
+        """Train the model"""
+        print("\n🚀 Starting training...\n")
+        start_time = time.time()
 
         for epoch in range(self.start_epoch, self.config.training_settings.num_epochs):
+            epoch_start_time = time.time()
+
+            print(f"{'='*50}")
             print(
-                f"\nEpoch {epoch + 1}/{self.config.training_settings.num_epochs} - {self.experiment_name}")
+                f"⏳ Epoch {epoch + 1}/{self.config.training_settings.num_epochs}")
+            print(f"{'='*50}")
+
+            # Calculate and store epoch time
+            epoch_duration = time.time() - epoch_start_time
+            self.epoch_times.append(epoch_duration)
+
+            # Calculate average epoch time and estimate remaining time
+            avg_epoch_time = sum(self.epoch_times) / len(self.epoch_times)
+            estimated_remaining = self._estimate_remaining_time(
+                epoch + 1, avg_epoch_time)
+
+            # Print time information in a box
+            print("\n┌─" + "─"*35 + "─┐")
+            print("│ ⏱️  Time Statistics:                    │")
+            print("├─" + "─"*35 + "─┤")
+            print(
+                f"│  • Current Epoch: {self._format_time(epoch_duration):<16} │")
+            print(
+                f"│  • Average Time:  {self._format_time(avg_epoch_time):<16} │")
+            print(f"│  • Remaining:     {estimated_remaining:<16} │")
+            print("└─" + "─"*35 + "─┘\n")
 
             # Training phase
             train_metrics, train_preds, train_labels = self.train_epoch()
 
             # Validation phase
-            val_metrics, val_preds, val_labels = self.evaluate(self.val_loader)
+            val_metrics, val_preds, val_labels = self.evaluate(
+                self.val_loader, 'val')
 
             # Store losses and metrics
             self.train_losses.append(train_metrics['loss'])
@@ -759,6 +812,13 @@ class Trainer:
         # Plot final confusion matrix
         self.plot_confusion_matrix(test_labels, test_preds, 'final')
 
+        # Print total training time at the end
+        total_time = time.time() - start_time
+        print("\n" + "="*50)
+        print("🎉 Training completed!")
+        print(f"⏰ Total training time: {self._format_time(total_time)}")
+        print("="*50 + "\n")
+
         return self.metrics_history
 
     def train_epoch(self):
@@ -827,22 +887,26 @@ class Trainer:
 
     def save_metrics(self, metrics, epoch, phase):
         """Save metrics to JSON file"""
-        metrics_dir = os.path.join(self.results_dir, 'metrics')
-        latest_metrics_dir = os.path.join(metrics_dir, 'latest')
-
-        # Ensure directories exist
-        self._ensure_dir_exists(metrics_dir)
-        self._ensure_dir_exists(latest_metrics_dir)
-
-        if epoch == 'latest':
-            metrics_file = os.path.join(
-                latest_metrics_dir, f'{phase}_metrics_{self.experiment_name}.json')
+        if isinstance(epoch, int):
+            # For periodic saves
+            if (epoch) % self.config.training_settings.checkpoint_freq == 0:
+                _, _, epoch_metrics_dir = self._create_epoch_directories(epoch)
+                metrics_file = os.path.join(
+                    epoch_metrics_dir,
+                    f'{phase}_metrics_{self.experiment_name}.json'
+                )
+                with open(metrics_file, 'w') as f:
+                    json.dump(metrics, f, indent=4)
         else:
+            # For 'latest', 'best', or 'final' saves
+            metrics_dir = os.path.join(self.results_dir, 'metrics', epoch)
+            self._ensure_dir_exists(metrics_dir)
             metrics_file = os.path.join(
-                metrics_dir, f'{phase}_metrics_{self.experiment_name}_epoch_{epoch}.json')
-
-        with open(metrics_file, 'w') as f:
-            json.dump(metrics, f, indent=4)
+                metrics_dir,
+                f'{phase}_metrics_{self.experiment_name}.json'
+            )
+            with open(metrics_file, 'w') as f:
+                json.dump(metrics, f, indent=4)
 
     def _setup_fine_tuned_directories(self):
         """Set up directories for fine-tuned embedding models"""
@@ -918,7 +982,6 @@ class Trainer:
                 f"  • Alpha: {self.config.data_settings.weighted_sampler_alpha}")
         print(
             f"- Number of Classes: {len(self.config.data_settings.class_names)}")
-        print(f"- Class Names: {self.config.data_settings.class_names}")
 
         # Directory configuration
         print("\n📂 Directory Configuration:")
