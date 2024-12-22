@@ -118,27 +118,42 @@ class Trainer:
 
     def _setup_directories(self):
         """Set up necessary directories for saving results"""
-        self.model_dir = os.path.join(
+        def normalize_path(*paths):
+            """Normalize path for cross-platform compatibility"""
+            return os.path.normpath(os.path.join(*paths))
+
+        # Store normalize function for use in other methods
+        self._normalize_path = normalize_path
+
+        # Set up main directories
+        self.model_dir = normalize_path(
             self.config.training_settings.save_model_dir,
             self.experiment_name
         )
-        self.results_dir = os.path.join(
+        self.results_dir = normalize_path(
             self.config.training_settings.save_results_dir,
             self.experiment_name
         )
 
-        # Create model directories
-        os.makedirs(self.model_dir, exist_ok=True)
-        os.makedirs(os.path.join(self.model_dir, 'checkpoints'), exist_ok=True)
-        os.makedirs(os.path.join(self.model_dir, 'latest'), exist_ok=True)
+        # Define all required directories
+        self.figures_dir = normalize_path(self.results_dir, 'figures')
+        self.metrics_dir = normalize_path(self.results_dir, 'metrics')
 
-        # Create results directories
-        os.makedirs(os.path.join(self.results_dir, 'figures'), exist_ok=True)
-        os.makedirs(os.path.join(self.results_dir,
-                    'figures', 'latest'), exist_ok=True)
-        os.makedirs(os.path.join(self.results_dir, 'metrics'), exist_ok=True)
-        os.makedirs(os.path.join(self.results_dir,
-                    'metrics', 'latest'), exist_ok=True)
+        # Create base directories
+        for directory in [self.model_dir, self.results_dir, self.figures_dir, self.metrics_dir]:
+            os.makedirs(directory, exist_ok=True)
+
+        # Create subdirectories
+        special_dirs = ['latest', 'best', 'final', 'checkpoints']
+        for special_dir in special_dirs:
+            os.makedirs(normalize_path(
+                self.model_dir, special_dir), exist_ok=True)
+            os.makedirs(normalize_path(
+                self.figures_dir, special_dir), exist_ok=True)
+            os.makedirs(normalize_path(
+                self.metrics_dir, special_dir), exist_ok=True)
+
+        print(f"✅ Created all necessary directories")
 
     def _create_experiment_name(self):
         """Create unique experiment name with key parameters"""
@@ -149,7 +164,8 @@ class Trainer:
         imbalanced_strategy = self.config.data_settings.imbalanced_strategy
         initial_strategy = self.config.model_settings.weight_init
         max_length = self.config.tokenizer_settings.max_length
-        return f"{model_type}_{tokenizer_name}_{max_length}_{layers}_{loss_function}_{initial_strategy}_{imbalanced_strategy}"
+        use_attention = self.config.model_settings.use_attention
+        return f"{model_type}_{tokenizer_name}_{max_length}_{layers}_{loss_function}_{initial_strategy}_{imbalanced_strategy}_A{use_attention}"
 
     def load_checkpoint(self, checkpoint_path=None):
         """Load checkpoint with enhanced fallback strategy"""
@@ -348,27 +364,34 @@ class Trainer:
         # Add more padding to prevent label cutoff
         plt.tight_layout(pad=1.1)
 
-        # Save the plot
+        # Determine save directory and create full path
         if isinstance(epoch, int):
-            # For periodic saves
-            if (epoch) % self.config.training_settings.checkpoint_freq == 0:
-                _, epoch_figures_dir, _ = self._create_epoch_directories(epoch)
-                save_path = os.path.join(
-                    epoch_figures_dir,
-                    f'{prefix}_confusion_matrix_{self.experiment_name}.png'
-                )
-                plt.savefig(save_path, bbox_inches='tight', dpi=300)
+            save_dir = self._normalize_path(self.figures_dir, f'epoch_{epoch}')
         else:
-            # For 'latest', 'best', or 'final' saves
-            figures_dir = os.path.join(self.results_dir, 'figures', epoch)
-            self._ensure_dir_exists(figures_dir)
-            save_path = os.path.join(
-                figures_dir,
-                f'{prefix}_confusion_matrix_{self.experiment_name}.png'
-            )
-            plt.savefig(save_path, bbox_inches='tight', dpi=300)
+            save_dir = self._normalize_path(self.figures_dir, str(epoch))
 
-        plt.close()
+        # Create save directory if it doesn't exist
+        os.makedirs(save_dir, exist_ok=True)
+
+        # Create full save path
+        filename = f'{prefix}_confusion_matrix_{self.experiment_name}.png'
+        save_path = self._normalize_path(save_dir, filename)
+
+        try:
+            # Ensure parent directory exists
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+            # Save figure
+            plt.savefig(save_path, bbox_inches='tight',
+                        dpi=300, facecolor='white')
+            print(f"✅ Saved confusion matrix to: {save_path}")
+        except Exception as e:
+            print(f"❌ Error saving confusion matrix")
+            print(f"Attempted path: {save_path}")
+            print(f"Error details: {str(e)}")
+            raise
+        finally:
+            plt.close()
 
     def plot_metrics(self, epoch=None):
         # Use a default style and customize it
@@ -516,7 +539,7 @@ class Trainer:
             wspace=0.20
         )
 
-        # Save with high quality
+        # Before saving, ensure all directories exist
         base_path = os.path.join(self.results_dir, 'figures')
         latest_figures_dir = os.path.join(base_path, 'latest')
         self._ensure_dir_exists(base_path)
@@ -633,21 +656,53 @@ class Trainer:
             save_path = os.path.join(
                 latest_figures_dir, f'{prefix}_class_performance_{self.experiment_name}.png')
         else:
+            epoch_figures_dir = os.path.join(base_path, f'epoch_{epoch}')
+            self._ensure_dir_exists(epoch_figures_dir)
             save_path = os.path.join(
-                base_path, f'{prefix}_class_performance_{self.experiment_name}_epoch_{epoch}.png')
+                epoch_figures_dir, f'{prefix}_class_performance_{self.experiment_name}.png')
+
+        # Ensure the immediate parent directory exists
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
         plt.savefig(save_path, bbox_inches='tight', dpi=300, facecolor='white')
         plt.close()
 
     def _format_time(self, seconds):
-        """Convert seconds to HH:MM:SS format"""
-        return str(timedelta(seconds=int(seconds)))
+        """Convert seconds to HH:MM:SS format with consistent padding"""
+        if seconds is None or seconds == 0:
+            return "00:00:00"
+
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        seconds = int(seconds % 60)
+
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
     def _estimate_remaining_time(self, current_epoch, avg_epoch_time):
-        """Estimate remaining training time"""
+        """Estimate remaining training time with proper handling of edge cases"""
+        if current_epoch >= self.config.training_settings.num_epochs:
+            return "00:00:00"
+
         remaining_epochs = self.config.training_settings.num_epochs - current_epoch
+        if avg_epoch_time is None or avg_epoch_time == 0:
+            return "00:00:00"
+
         remaining_seconds = remaining_epochs * avg_epoch_time
         return self._format_time(remaining_seconds)
+
+    def _print_time_statistics(self, epoch_time, avg_epoch_time, remaining_time):
+        """Print time statistics in a consistent format with proper alignment"""
+        # Format times with consistent width
+        current_epoch_time = self._format_time(epoch_time)
+        average_time = self._format_time(avg_epoch_time)
+
+        print("\n┌─────────────────────────────────────┐")
+        print("│ ⏱️  Time Statistics                  │")
+        print("├─────────────────────────────────────┤")
+        print(f"│  • Current Epoch: {current_epoch_time:<8}    │")
+        print(f"│  • Average Time:  {average_time:<8}    │")
+        print(f"│  • Remaining:     {remaining_time:<8}    │")
+        print("└─────────────────────────────────────┘")
 
     def train(self):
         """Train the model"""
@@ -672,15 +727,8 @@ class Trainer:
                 epoch + 1, avg_epoch_time)
 
             # Print time information in a box
-            print("\n┌─" + "─"*35 + "─┐")
-            print("│ ⏱️  Time Statistics:                    │")
-            print("├─" + "─"*35 + "─┤")
-            print(
-                f"│  • Current Epoch: {self._format_time(epoch_duration):<16} │")
-            print(
-                f"│  • Average Time:  {self._format_time(avg_epoch_time):<16} │")
-            print(f"│  • Remaining:     {estimated_remaining:<16} │")
-            print("└─" + "─"*35 + "─┘\n")
+            self._print_time_statistics(
+                epoch_duration, avg_epoch_time, estimated_remaining)
 
             # Training phase
             train_metrics, train_preds, train_labels = self.train_epoch()
