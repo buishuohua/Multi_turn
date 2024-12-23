@@ -156,16 +156,70 @@ class Trainer:
         print(f"✅ Created all necessary directories")
 
     def _create_experiment_name(self):
-        """Create unique experiment name with key parameters"""
-        model_type = self.config.model_selection.model_type
-        tokenizer_name = self.config.tokenizer_settings.name
-        layers = self.config.model_settings.num_layers
-        loss_function = self.config.model_settings.loss
-        imbalanced_strategy = self.config.data_settings.imbalanced_strategy
-        initial_strategy = self.config.model_settings.weight_init
-        max_length = self.config.tokenizer_settings.max_length
-        use_attention = self.config.model_settings.use_attention
-        return f"{model_type}_{tokenizer_name}_{max_length}_{layers}_{loss_function}_{initial_strategy}_{imbalanced_strategy}_A{use_attention}"
+        """Create concise but informative experiment name"""
+        components = []
+
+        # 1. Model Architecture (including bidirectional)
+        model_prefix = 'Bi' if self.config.model_settings.bidirectional else ''
+        components.append(
+            f"{model_prefix}{self.config.model_selection.model_type}")
+
+        # 2. Embedding Info
+        emb_name = self.config.model_settings.embedding_type.split('_')[
+            0]  # BERT/RoBERTa/glove
+        components.append(emb_name)
+
+        # 3. Core Model Parameters
+        # Number of layers
+        components.append(f"L{self.config.model_settings.num_layers}")
+        # Hidden dimension
+        components.append(f"H{self.config.model_settings.init_hidden_dim}")
+        components.append(
+            f"M{self.config.tokenizer_settings.max_length}")  # Max length
+
+        # 4. Training Strategy
+        components.append(self.config.model_settings.loss.replace(
+            '_', ''))  # Loss function
+
+        # 5. Initialization Function
+        init_map = {
+            'xavier_uniform': 'xavier',
+            'xavier_normal': 'xavier',
+            'kaiming_uniform': 'kaiming',
+            'kaiming_normal': 'kaiming',
+            'orthogonal': 'ortho',
+            'zeros': 'zero',
+            'ones': 'one'
+        }
+        init_name = init_map.get(self.config.model_settings.weight_init,
+                                 self.config.model_settings.weight_init[:3])
+        components.append(init_name)
+
+        # 6. Data Strategy (if any)
+        if self.config.data_settings.imbalanced_strategy != 'none':
+            imbal_map = {
+                'weighted_sampler': 'ws',
+                'class_weights': 'cw',
+                'random_oversample': 'ros',
+                'random_undersample': 'rus',
+                'smote': 'sm',
+                'adasyn': 'ada',
+                'tomek': 'tmk'
+            }
+            imbal_code = imbal_map.get(self.config.data_settings.imbalanced_strategy,
+                                       self.config.data_settings.imbalanced_strategy[:3])
+            components.append(imbal_code)
+
+        # 7. Special Features (as flags)
+        flags = []
+        if self.config.model_settings.use_attention:
+            flags.append('A')  # Attention
+        if self.config.model_settings.fine_tune_embedding:
+            flags.append('FT')  # Fine-tuning
+        if flags:
+            components.append(''.join(flags))
+
+        return '_'.join(components)
 
     def load_checkpoint(self, checkpoint_path=None):
         """Load checkpoint with enhanced fallback strategy"""
@@ -667,42 +721,25 @@ class Trainer:
         plt.savefig(save_path, bbox_inches='tight', dpi=300, facecolor='white')
         plt.close()
 
+    def _display_time_statistics(self, epoch_time=None, avg_time=None, remaining_time=None):
+        """Display formatted time statistics during training"""
+        print("\n┌───────────────────────────────────────────┐")
+        print("│ ⏱️  Time Statistics                        │")
+        print("├───────────────────────────────────────────┤")
+        print(f"│  • Current Epoch: {self._format_time(epoch_time):<15} │")
+        print(f"│  • Average Time:  {self._format_time(avg_time):<15} │")
+        print(f"│  • Remaining:     {self._format_time(remaining_time):<15} │")
+        print("└───────────────────────────────────────────┘")
+
     def _format_time(self, seconds):
-        """Convert seconds to HH:MM:SS format with consistent padding"""
-        if seconds is None or seconds == 0:
-            return "00:00:00"
+        """Format time in HH:MM:SS format"""
+        if seconds is None:
+            return "--:--:--"
 
         hours = int(seconds // 3600)
         minutes = int((seconds % 3600) // 60)
         seconds = int(seconds % 60)
-
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-
-    def _estimate_remaining_time(self, current_epoch, avg_epoch_time):
-        """Estimate remaining training time with proper handling of edge cases"""
-        if current_epoch >= self.config.training_settings.num_epochs:
-            return "00:00:00"
-
-        remaining_epochs = self.config.training_settings.num_epochs - current_epoch
-        if avg_epoch_time is None or avg_epoch_time == 0:
-            return "00:00:00"
-
-        remaining_seconds = remaining_epochs * avg_epoch_time
-        return self._format_time(remaining_seconds)
-
-    def _print_time_statistics(self, epoch_time, avg_epoch_time, remaining_time):
-        """Print time statistics in a consistent format with proper alignment"""
-        # Format times with consistent width
-        current_epoch_time = self._format_time(epoch_time)
-        average_time = self._format_time(avg_epoch_time)
-
-        print("\n┌─────────────────────────────────────┐")
-        print("│ ⏱️  Time Statistics                  │")
-        print("├─────────────────────────────────────┤")
-        print(f"│  • Current Epoch: {current_epoch_time:<8}    │")
-        print(f"│  • Average Time:  {average_time:<8}    │")
-        print(f"│  • Remaining:     {remaining_time:<8}    │")
-        print("└─────────────────────────────────────┘")
 
     def train(self):
         """Train the model"""
@@ -727,7 +764,7 @@ class Trainer:
                 epoch + 1, avg_epoch_time)
 
             # Print time information in a box
-            self._print_time_statistics(
+            self._display_time_statistics(
                 epoch_duration, avg_epoch_time, estimated_remaining)
 
             # Training phase
