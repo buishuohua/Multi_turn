@@ -29,7 +29,8 @@ from imblearn.under_sampling import (
 from collections import Counter
 
 
-def _loader_data():
+def _loader_data(task_type):
+    """Load data based on task type"""
     PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     DATA_PATH = os.path.join(PROJECT_ROOT, "data")
 
@@ -42,17 +43,23 @@ def _loader_data():
 
     actor_origin = pd.read_csv(actor_path)
     coa_origin = pd.read_csv(coa_path)
-    safe_origin = pd.read_csv(safe_path)
 
     actor = actor_origin.copy(deep=True)
     coa = coa_origin.copy(deep=True)
-    safe = safe_origin.copy(deep=True)
+
+    if task_type == 'identification':
+        # For identification task, include safe data
+        safe_origin = pd.read_csv(safe_path)
+        safe = safe_origin.copy(deep=True)
+        safe = safe.loc[:, ["category", "question", "response", "turn"]]
+        data = pd.concat([actor, coa, safe], axis=0, ignore_index=True)
+    else:
+        # For classification task, only include attack data
+        data = pd.concat([actor, coa], axis=0, ignore_index=True)
 
     actor = actor.loc[:, ["category", "question", "response", "turn"]]
     coa = coa.loc[:, ["category", "question", "response", "turn"]]
-    safe = safe.loc[:, ["category", "question", "response", "turn"]]
 
-    data = pd.concat([actor, coa, safe], axis=0, ignore_index=True)
     data.reset_index(drop=True, inplace=True)
 
     data["question"] = data["question"].apply(ast.literal_eval)
@@ -195,7 +202,8 @@ def train_val_test_split(data, config):
 
 
 def loader(config):
-    data = _loader_data()
+    # Pass task type to _loader_data
+    data = _loader_data(config.training_settings.task_type)
 
     tokenizer = config.tokenizer_settings.get_model().tokenizer
     data = truncate(

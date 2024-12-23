@@ -159,17 +159,20 @@ class Trainer:
         """Create concise but informative experiment name"""
         components = []
 
-        # 1. Model Architecture (including bidirectional)
+        # 1. Task Type Prefix
+        task_prefix = 'ID' if self.config.training_settings.task_type == 'identification' else 'CLS'
+        components.append(task_prefix)
+
+        # 2. Model Architecture (including bidirectional)
         model_prefix = 'Bi' if self.config.model_settings.bidirectional else ''
         components.append(
             f"{model_prefix}{self.config.model_selection.model_type}")
 
-        # 2. Embedding Info
-        emb_name = self.config.model_settings.embedding_type.split('_')[
-            0]  # BERT/RoBERTa/glove
+        # 3. Embedding Info
+        emb_name = self.config.model_settings.embedding_type.split('_')[0]
         components.append(emb_name)
 
-        # 3. Core Model Parameters
+        # 4. Core Model Parameters
         # Number of layers
         components.append(f"L{self.config.model_settings.num_layers}")
         # Hidden dimension
@@ -177,11 +180,11 @@ class Trainer:
         components.append(
             f"M{self.config.tokenizer_settings.max_length}")  # Max length
 
-        # 4. Training Strategy
+        # 5. Training Strategy
         components.append(self.config.model_settings.loss.replace(
             '_', ''))  # Loss function
 
-        # 5. Initialization Function
+        # 6. Initialization Function
         init_map = {
             'xavier_uniform': 'xavier',
             'xavier_normal': 'xavier',
@@ -195,7 +198,7 @@ class Trainer:
                                  self.config.model_settings.weight_init[:3])
         components.append(init_name)
 
-        # 6. Data Strategy (if any)
+        # 7. Data Strategy (if any)
         if self.config.data_settings.imbalanced_strategy != 'none':
             imbal_map = {
                 'weighted_sampler': 'ws',
@@ -210,7 +213,7 @@ class Trainer:
                                        self.config.data_settings.imbalanced_strategy[:3])
             components.append(imbal_code)
 
-        # 7. Special Features (as flags)
+        # 8. Special Features (as flags)
         flags = []
         if self.config.model_settings.use_attention:
             flags.append('A')  # Attention
@@ -723,7 +726,7 @@ class Trainer:
 
     def _display_time_statistics(self, epoch_time=None, avg_time=None, remaining_time=None):
         """Display formatted time statistics during training"""
-        print("\n┌───────────────────────────────────────────┐")
+        print("\n┌───────────────────────────────────────────��")
         print("│ ⏱️  Time Statistics                        │")
         print("├───────────────────────────────────────────┤")
         print(f"│  • Current Epoch: {self._format_time(epoch_time):<15} │")

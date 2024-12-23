@@ -18,6 +18,7 @@ import re
 @dataclass
 class TrainingSettings:
     """Specific training configurations"""
+    task_type: Literal['identification', 'classification'] = 'classification'
     num_epochs: int = 100
     batch_size: int = 256
 
@@ -49,6 +50,10 @@ class TrainingSettings:
 
     def __post_init__(self):
         """Validate settings after initialization and auto-detect continue_training"""
+        if self.task_type not in ['identification', 'classification']:
+            raise ValueError(
+                "task_type must be either 'identification' or 'classification'")
+
         if self.num_epochs <= 0:
             raise ValueError("num_epochs must be positive")
 
