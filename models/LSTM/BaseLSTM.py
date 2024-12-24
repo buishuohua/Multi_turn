@@ -41,7 +41,13 @@ class BaseLSTM(nn.Module, ABC):
         # Common layers
         self.final_activation = config.model_settings.get_final_activation()
         self.dropout = nn.Dropout(config.model_settings.dropout_rate)
+        self.res_dropout = nn.Dropout(
+            config.model_settings.res_dropout) if config.model_settings.use_res_net else None
         self.lstm = self._create_lstm()
+
+        # Create projection layers for residual connections if dimensions don't match
+        self.res_projections = self._create_res_projections(
+        ) if config.model_settings.use_res_net else None
 
         # Add attention layer if enabled
         self.attention = None
@@ -50,96 +56,61 @@ class BaseLSTM(nn.Module, ABC):
 
         self.fc_layers = self._create_fc_layers()
 
+        # Create layer normalization layers if enabled
+        self.layer_norms = self._create_layer_norms(
+        ) if config.model_settings.use_layer_norm else None
+
         # Initialize weights after creating layers
         self._initialize_weights()
 
     def _load_or_create_embedding_model(self):
         """Load fine-tuned embedding model if exists, otherwise create new"""
         if self.config.model_settings.fine_tune_embedding:
-            # Define paths
+            # Get the base model
+            embedding_model = self.config.tokenizer_settings.get_model().model
+
+            # For full fine-tuning, enable gradients for all parameters
+            for param in embedding_model.parameters():
+                param.requires_grad = True
+
+            print("\n[Fine-tuning] Enabled full fine-tuning of embedding model")
+
+            # Try to load existing fine-tuned model if it exists
             fine_tuned_dir = os.path.join(
                 self.config.training_settings.fine_tuned_models_dir,
                 self.config.model_settings.embedding_type
             )
-            checkpoints_dir = os.path.join(fine_tuned_dir, 'checkpoints')
 
-            # Create new embedding model
-            embedding_model = self.config.tokenizer_settings.get_model().model
-
-            # Check for existing checkpoints
-            if os.path.exists(checkpoints_dir):
-                checkpoint_files = [f for f in os.listdir(
-                    checkpoints_dir) if f.endswith('.pt')]
-                if checkpoint_files:
-                    latest_epoch = max([int(re.search(r'epoch_(\d+)\.pt$', f).group(1))
-                                        for f in checkpoint_files if re.search(r'epoch_(\d+)\.pt$', f)])
-
-                    checkpoint_path = os.path.join(
-                        checkpoints_dir, f'embedding_model_epoch_{latest_epoch}.pt')
+            if os.path.exists(fine_tuned_dir):
+                # Try loading best model first
+                best_path = os.path.join(
+                    fine_tuned_dir, 'best', 'embedding_model_best.pt')
+                if os.path.exists(best_path):
                     try:
-                        checkpoint = torch.load(checkpoint_path)
-                        state_dict = checkpoint.get('state_dict', checkpoint)
-                        embedding_model.load_state_dict(state_dict)
-                        print(
-                            f"\n[Fine-tuning] Loaded embedding model from epoch {latest_epoch}")
+                        checkpoint = torch.load(best_path)
+                        embedding_model.load_state_dict(
+                            checkpoint['state_dict'])
+                        print(f"✅ Loaded best fine-tuned embedding model")
+                        return embedding_model
                     except Exception as e:
-                        print(
-                            f"\n[Fine-tuning] Warning: Using fresh embedding model ({str(e)})")
-            else:
-                print("\n[Fine-tuning] Starting with fresh embedding model")
+                        print(f"⚠️ Could not load best model: {str(e)}")
 
+            print("🆕 Starting with fresh embedding model for fine-tuning")
             return embedding_model
 
-        # If not fine-tuning
-        return self.config.tokenizer_settings.get_model().model
+        # If not fine-tuning, return the model with frozen parameters
+        model = self.config.tokenizer_settings.get_model().model
+        for param in model.parameters():
+            param.requires_grad = False
+        return model
 
     def _create_attention(self) -> nn.Module:
-        """Create attention layer based on configuration"""
-        config = self.config.model_settings
-        hidden_size = config.hidden_dims[-1] * \
-            (2 if config.bidirectional else 1)
+        """Create attention module based on configuration"""
+        if not self.config.model_settings.use_attention:
+            return None
 
-        if config.attention_type == 'dot':
-            return nn.Linear(hidden_size, hidden_size)  # Simple dot attention
-
-        elif config.attention_type == 'general':
-            return nn.Sequential(
-                nn.Linear(hidden_size, config.attention_dim),
-                nn.Tanh(),
-                nn.Linear(config.attention_dim, hidden_size)
-            )
-
-        elif config.attention_type == 'concat':
-            return nn.Sequential(
-                nn.Linear(hidden_size * 2, config.attention_dim),
-                nn.Tanh(),
-                nn.Linear(config.attention_dim, 1)
-            )
-
-        elif config.attention_type == 'scaled_dot':
-            class ScaledDotAttention(nn.Module):
-                def __init__(self, dim, temperature=1.0):
-                    super().__init__()
-                    self.scale = temperature * math.sqrt(dim)
-
-                def forward(self, x):
-                    # x shape: (batch, seq_len, hidden_size)
-                    attention = torch.bmm(x, x.transpose(1, 2)) / self.scale
-                    attention = F.softmax(attention, dim=-1)
-                    return torch.bmm(attention, x)
-
-            return ScaledDotAttention(hidden_size, config.attention_temperature)
-
-        elif config.attention_type == 'multi_head':
-            return nn.MultiheadAttention(
-                embed_dim=hidden_size,
-                num_heads=config.num_attention_heads,
-                dropout=config.attention_dropout,
-                batch_first=True
-            )
-        else:
-            raise ValueError(
-                f"Unknown attention type: {config.attention_type}")
+        from models.Attention.multi_head_attention import MultiHeadAttention
+        return MultiHeadAttention(self.config)
 
     def _create_lstm(self) -> nn.Module:
         """Create LSTM layer with different hidden sizes for each layer"""
@@ -198,7 +169,7 @@ class BaseLSTM(nn.Module, ABC):
     def init_hidden(self, batch_size: int) -> List[Tuple[torch.Tensor, torch.Tensor]]:
         """Initialize hidden states for each LSTM layer"""
         hidden_states = []
-        for i, hidden_size in enumerate(self.config.model_settings.hidden_dims):
+        for hidden_size in self.config.model_settings.hidden_dims:
             num_directions = 2 if self.config.model_settings.bidirectional else 1
             weight = next(self.parameters())
             h0 = weight.new_zeros(num_directions, batch_size, hidden_size)
@@ -206,32 +177,40 @@ class BaseLSTM(nn.Module, ABC):
             hidden_states.append((h0, c0))
         return hidden_states
 
+    def _create_res_projections(self) -> Optional[nn.ModuleList]:
+        """Create projection layers for residual connections when dimensions don't match"""
+        if not self.config.model_settings.use_res_net:
+            return None
+
+        projections = []
+        input_size = self.config.model_settings.embedding_dim
+        for hidden_size in self.config.model_settings.hidden_dims:
+            out_size = hidden_size * \
+                (2 if self.config.model_settings.bidirectional else 1)
+            if input_size != out_size:
+                projections.append(nn.Linear(input_size, out_size))
+            else:
+                projections.append(nn.Identity())
+            input_size = out_size
+
+        return nn.ModuleList(projections)
+
     @abstractmethod
     def forward(self, x: torch.Tensor,
-                hidden: Optional[Tuple[torch.Tensor, torch.Tensor]] = None) -> Tuple[
-            torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        pass
+                hidden: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None) -> Tuple[
+            torch.Tensor, List[Tuple[torch.Tensor, torch.Tensor]]]:
+        """Abstract forward method to be implemented by subclasses"""
+        raise NotImplementedError
 
     def get_model_info(self) -> Dict[str, Any]:
         """Get model information for logging"""
-        info = {
-            'embedding_type': self.config.model_settings.embedding_type,
-            'embedding_dim': self.config.model_settings.embedding_dim,
-            'hidden_dims': self.config.model_settings.hidden_dims,
-            'bidirectional': self.config.model_settings.bidirectional,
-            'dropout_rate': self.config.model_settings.dropout_rate,
-            'num_layers': len(self.lstm),
-            'use_attention': self.config.model_settings.use_attention
-        }
-
-        if self.config.model_settings.use_attention:
+        info = super().get_model_info()
+        # Add residual network information
+        if self.config.model_settings.use_res_net:
             info.update({
-                'attention_type': self.config.model_settings.attention_type,
-                'attention_heads': self.config.model_settings.num_attention_heads,
-                'attention_dim': self.config.model_settings.attention_dim,
-                'attention_dropout': self.config.model_settings.attention_dropout
+                'use_res_net': True,
+                'res_dropout': self.config.model_settings.res_dropout
             })
-
         return info
 
     def _initialize_weights(self):

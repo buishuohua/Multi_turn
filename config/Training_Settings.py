@@ -26,7 +26,7 @@ class TrainingSettings:
     learning_rate: float = 0.001
     weight_decay: float = 0.01
     gradient_clip: Optional[float] = 1.0
-    optimizer_type: Literal['adam', 'adamw', 'sgd'] = 'adam'
+    optimizer_type: Literal['adam', 'adamw', 'sgd'] = 'adamw'
 
     # Early stopping and scheduler settings
     early_stopping_patience: int = 5
@@ -132,5 +132,6 @@ class TrainingSettings:
             learning_rate=0.001,
             weight_decay=0.01,
             gradient_clip=1.0,
-            optimizer_type='adam',
+            optimizer_type='adamw',
+            continue_training=True
         )

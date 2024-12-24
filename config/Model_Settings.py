@@ -23,12 +23,17 @@ class ModelSettings:
                             'RoBERTa_base', 'glove_100d', 'glove_300d'] = 'BERT_base_uncased'
 
     # Optional parameters (with defaults)
-    init_hidden_dim: int = 256
+    init_hidden_dim: Optional[int] = 256  # Make it optional
+    custom_hidden_dims: Optional[List[int]] = None
+    # This will store the actual hidden dims used
     hidden_dims: List[int] = field(init=False)
     dropout_rate: float = 0.1
     num_layers: int = 2
     bidirectional: bool = True
     fine_tune_embedding: bool = False
+    fine_tune_mode: Literal['full', 'last_n',
+                            'gradual'] = 'full'  # We'll use 'full' for now
+    fine_tune_lr: float = 2e-5  # Separate learning rate for BERT fine-tuning
     activation: Literal['relu', 'gelu', 'tanh', 'sigmoid'] = 'relu'
     final_activation: Literal['softmax', 'sigmoid', 'linear'] = 'softmax'
     loss: Literal['cross_entropy',              # Standard cross-entropy
@@ -58,13 +63,24 @@ class ModelSettings:
     class_weights: Optional[List[float]] = None
 
     # Add new attention-related parameters
-    use_attention: bool = False
+    use_attention: bool = True
     attention_type: Literal['dot', 'general', 'concat',
                             'scaled_dot', 'multi_head'] = 'scaled_dot'
     attention_dim: Optional[int] = None  # Will default to hidden_dim if None
     num_attention_heads: int = 8  # For multi-head attention
     attention_dropout: float = 0.1
     attention_temperature: float = 1.0  # Scaling factor for attention scores
+
+    # Add residual network parameter
+    use_res_net: bool = False  # Whether to use residual connections between LSTM layers
+    res_dropout: float = 0.1   # Dropout rate for residual connections
+
+    # Add layer normalization settings
+    use_layer_norm: bool = True
+    layer_norm_eps: float = 1e-5
+    # True for elementwise, False for layerwise
+    layer_norm_elementwise: bool = False
+    layer_norm_affine: bool = True  # Whether to use learnable affine parameters
 
     def __post_init__(self):
         """Validate settings after initialization"""
@@ -78,8 +94,22 @@ class ModelSettings:
         if not 0 <= self.dropout_rate <= 1:
             raise ValueError("dropout_rate must be between 0 and 1")
 
-        self.hidden_dims = [self.init_hidden_dim //
-                            (2**i) for i in range(self.num_layers)]
+        # Modified hidden dimensions logic
+        if self.custom_hidden_dims is not None:
+            if len(self.custom_hidden_dims) != self.num_layers:
+                raise ValueError(f"Number of custom hidden dimensions ({len(self.custom_hidden_dims)}) "
+                                 f"must match number of layers ({self.num_layers})")
+            if not all(isinstance(dim, int) and dim > 0 for dim in self.custom_hidden_dims):
+                raise ValueError(
+                    "All custom hidden dimensions must be positive integers")
+            self.hidden_dims = self.custom_hidden_dims
+            self.init_hidden_dim = None  # Set to None when using custom dims
+        else:
+            if self.init_hidden_dim is None:
+                raise ValueError(
+                    "Either init_hidden_dim or custom_hidden_dims must be provided")
+            self.hidden_dims = [self.init_hidden_dim //
+                                (2**i) for i in range(self.num_layers)]
 
         if not all(isinstance(dim, int) and dim > 0 for dim in self.hidden_dims):
             raise ValueError("All hidden dimensions must be positive integers")
@@ -312,6 +342,8 @@ class ModelSettings:
             num_layers=2,
             bidirectional=True,
             fine_tune_embedding=False,
+            fine_tune_mode='full',
+            fine_tune_lr=2e-5,
             activation='relu',
             final_activation='softmax',
             loss='cross_entropy',
@@ -327,10 +359,13 @@ class ModelSettings:
             label_smoothing=0.1,
             class_weights=None,
             # Default attention settings
-            use_attention=False,
+            use_attention=True,
             attention_type='scaled_dot',
             attention_dim=None,
             num_attention_heads=8,
             attention_dropout=0.1,
-            attention_temperature=1.0
+            attention_temperature=1.0,
+            # Default residual network settings
+            use_res_net=False,
+            res_dropout=0.1
         )
