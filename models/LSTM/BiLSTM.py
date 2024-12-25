@@ -35,75 +35,86 @@ class BiLSTM(BaseLSTM):
         super().__init__(config)
         self.dropout = nn.Dropout(config.model_settings.dropout_rate)
 
-    def forward(self, x: torch.Tensor,
-                hidden: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None) -> Tuple[
-            torch.Tensor, List[Tuple[torch.Tensor, torch.Tensor]]]:
-        """
-        Forward pass implementation for BiLSTM
+        # Ensure hidden_dims is properly initialized
+        if not hasattr(self.config.model_settings, 'hidden_dims') or not self.config.model_settings.hidden_dims:
+            raise ValueError(
+                "hidden_dims must be initialized before creating layer norms")
 
-        Args:
-            x: Input tensor of shape (batch_size, sequence_length)
-            hidden: Optional initial hidden states for each layer
+        # Initialize layer norms with consistent naming
+        if self.config.model_settings.use_layer_norm:
+            # Create layer norms for each LSTM layer
+            lstm_layer_norms = {}
+            for i in range(len(self.lstm)):  # Use len(self.lstm) instead of num_layers
+                layer_dim = self.config.model_settings.hidden_dims[i] * (
+                    2 if config.model_settings.bidirectional else 1)
+                lstm_layer_norms[f'lstm_{i}'] = nn.LayerNorm(
+                    layer_dim,
+                    eps=config.model_settings.layer_norm_eps,
+                    elementwise_affine=config.model_settings.layer_norm_affine
+                )
 
-        Returns:
-            output: Model output of shape (batch_size, num_classes)
-            hidden_states: List of final hidden states for each layer
-        """
-        batch_size = x.size(0)
+            # Add final layer norm
+            final_dim = self.config.model_settings.hidden_dims[-1] * (
+                2 if config.model_settings.bidirectional else 1)
+            lstm_layer_norms['final'] = nn.LayerNorm(
+                final_dim,
+                eps=config.model_settings.layer_norm_eps,
+                elementwise_affine=config.model_settings.layer_norm_affine
+            )
 
+            self.layer_norms = nn.ModuleDict(lstm_layer_norms)
+
+    def forward(self, x, attention_mask=None):
         # Get embeddings
-        if not self.config.model_settings.fine_tune_embedding:
-            with torch.no_grad():
-                # shape: [batch_size, seq_len, embedding_dim]
-                x = self.embedding_model(x)[0]
-        else:
-            x = self.embedding_model(x)[0]
+        # [batch_size, seq_len, embedding_dim]
+        embedded = self.embedding_model(x).last_hidden_state
 
-        # Initialize hidden states if not provided
-        if hidden is None:
-            hidden = self.init_hidden(batch_size)
+        # Initialize hidden states
+        hidden_states = self.init_hidden(x.size(0))
 
-        # Process through LSTM layers
-        current_hidden_states = []
-        residual = x  # Store input for residual connection
-
+        # Process through LSTM layers with residual connections
+        lstm_out = embedded
         for i, lstm_layer in enumerate(self.lstm):
-            # Store the input for residual connection
-            residual = x
+            # Store residual
+            residual = lstm_out
 
-            # Process through LSTM
-            lstm_out, (h_n, c_n) = lstm_layer(x, hidden[i])
-            current_hidden_states.append((h_n, c_n))
-
-            # Apply layer normalization if enabled
-            if self.layer_norms is not None:
-                lstm_out = self.layer_norms[i](lstm_out)
+            # LSTM forward pass
+            lstm_out, (h, c) = lstm_layer(lstm_out, hidden_states[i])
 
             # Apply residual connection if enabled
             if self.config.model_settings.use_res_net:
                 projected_residual = self.res_projections[i](residual)
-                lstm_out = lstm_out + self.res_dropout(projected_residual)
+                if self.res_dropout is not None:
+                    projected_residual = self.res_dropout(projected_residual)
+                lstm_out = lstm_out + projected_residual
 
-            if i < len(self.lstm) - 1:
-                lstm_out = self.dropout(lstm_out)
+            # Apply layer normalization if enabled
+            if self.layer_norms is not None:
+                lstm_out = self.layer_norms[f'lstm_{i}'](lstm_out)
 
-            x = lstm_out
+        # Get final hidden state (concatenate forward and backward if bidirectional)
+        if self.config.model_settings.bidirectional:
+            hidden = torch.cat((lstm_out[:, -1, :self.config.model_settings.hidden_dims[-1]],
+                                lstm_out[:, 0, self.config.model_settings.hidden_dims[-1]:]), dim=1)
+        else:
+            hidden = lstm_out[:, -1, :]
 
-        # Apply attention if configured
-        if self.attention is not None:
-            x, _ = self.attention(x)
+        # Apply final layer norm if enabled
+        if self.layer_norms is not None:
+            hidden = self.layer_norms['final'](hidden)
 
-        # Apply pooling
-        if self.config.model_settings.pooling == 'mean':
-            x = torch.mean(x, dim=1)  # [batch_size, hidden_dim]
-        else:  # 'last'
-            x = x[:, -1, :]  # [batch_size, hidden_dim]
+        # Store activations for monitoring
+        activations = {
+            'first_layer': hidden.detach(),
+            'middle_layer': None,
+            'last_layer': None
+        }
 
-        # Final dropout and FC layers
-        x = self.dropout(x)
-        logits = self.fc_layers(x)  # [batch_size, num_classes]
+        # Pass through FC layers
+        x = self.fc_layers(hidden)
+        activations['last_layer'] = x.detach()
 
-        return logits, current_hidden_states
+        return x, activations
 
     def get_model_info(self) -> Dict[str, Any]:
         """Get model information for logging"""

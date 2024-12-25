@@ -49,6 +49,10 @@ class BaseLSTM(nn.Module, ABC):
         self.res_projections = self._create_res_projections(
         ) if config.model_settings.use_res_net else None
 
+        # Create layer normalization layers if enabled
+        self.layer_norms = self._create_layer_norms(
+        ) if config.model_settings.use_layer_norm else None
+
         # Add attention layer if enabled
         self.attention = None
         if config.model_settings.use_attention:
@@ -56,53 +60,97 @@ class BaseLSTM(nn.Module, ABC):
 
         self.fc_layers = self._create_fc_layers()
 
-        # Create layer normalization layers if enabled
-        self.layer_norms = self._create_layer_norms(
-        ) if config.model_settings.use_layer_norm else None
-
         # Initialize weights after creating layers
         self._initialize_weights()
 
     def _load_or_create_embedding_model(self):
-        """Load fine-tuned embedding model if exists, otherwise create new"""
-        if self.config.model_settings.fine_tune_embedding:
-            # Get the base model
-            embedding_model = self.config.tokenizer_settings.get_model().model
+        """Load or create embedding model with fine-tuning configuration"""
+        # Get the base model
+        embedding_model = self.config.tokenizer_settings.get_model().model
 
-            # For full fine-tuning, enable gradients for all parameters
+        # If not fine-tuning, freeze all parameters
+        if not self.config.model_settings.fine_tune_embedding:
             for param in embedding_model.parameters():
-                param.requires_grad = True
-
-            print("\n[Fine-tuning] Enabled full fine-tuning of embedding model")
-
-            # Try to load existing fine-tuned model if it exists
-            fine_tuned_dir = os.path.join(
-                self.config.training_settings.fine_tuned_models_dir,
-                self.config.model_settings.embedding_type
-            )
-
-            if os.path.exists(fine_tuned_dir):
-                # Try loading best model first
-                best_path = os.path.join(
-                    fine_tuned_dir, 'best', 'embedding_model_best.pt')
-                if os.path.exists(best_path):
-                    try:
-                        checkpoint = torch.load(best_path)
-                        embedding_model.load_state_dict(
-                            checkpoint['state_dict'])
-                        print(f"✅ Loaded best fine-tuned embedding model")
-                        return embedding_model
-                    except Exception as e:
-                        print(f"⚠️ Could not load best model: {str(e)}")
-
-            print("🆕 Starting with fresh embedding model for fine-tuning")
+                param.requires_grad = False
+            print("❄️ All embedding layers frozen (no fine-tuning)")
             return embedding_model
 
-        # If not fine-tuning, return the model with frozen parameters
-        model = self.config.tokenizer_settings.get_model().model
-        for param in model.parameters():
-            param.requires_grad = False
-        return model
+        # Apply fine-tuning strategy based on mode
+        if self.config.model_settings.fine_tune_mode == 'none':
+            raise ValueError(
+                "fine_tune_mode 'none' is incompatible with fine_tune_embedding=True")
+
+        elif self.config.model_settings.fine_tune_mode == 'full':
+            # Enable gradients for all parameters
+            for param in embedding_model.parameters():
+                param.requires_grad = True
+            print("🔥 Full fine-tuning mode: all layers unfrozen")
+
+        elif self.config.model_settings.fine_tune_mode == 'last_n':
+            # Freeze first n layers, unfreeze last layers
+            num_frozen = self.config.model_settings.num_frozen_layers
+            unfrozen_count = 0
+            for name, param in embedding_model.named_parameters():
+                layer_num = int(re.search(r'layer\.(\d+)\.',
+                                name).group(1)) if 'layer.' in name else -1
+                if layer_num < num_frozen and layer_num != -1:
+                    param.requires_grad = False
+                else:
+                    param.requires_grad = True
+                    unfrozen_count += 1
+            # Divide by 2 because each layer has 2 parameter groups
+            print(
+                f"🔄 Last-N fine-tuning mode: last {unfrozen_count//2} layers unfrozen")
+
+        elif self.config.model_settings.fine_tune_mode == 'selective':
+            # Unfreeze only specific layers with their learning rate multipliers
+            selective_layers = self.config.model_settings.selective_layers
+            lr_multipliers = self.config.model_settings.layer_lr_multipliers or {
+                layer: 1.0 - (0.1 * i)  # Default multipliers if not specified
+                for i, layer in enumerate(selective_layers)
+            }
+
+            unfrozen_layers = []
+            for name, param in embedding_model.named_parameters():
+                layer_num = int(re.search(r'layer\.(\d+)\.',
+                                name).group(1)) if 'layer.' in name else -1
+                if layer_num in selective_layers:
+                    param.requires_grad = True
+                    param.lr_scale = lr_multipliers[layer_num]
+                    if layer_num not in unfrozen_layers:
+                        unfrozen_layers.append(layer_num)
+                else:
+                    param.requires_grad = False
+            print(
+                f"🎯 Selective fine-tuning mode: layers {sorted(unfrozen_layers)} unfrozen")
+
+        elif self.config.model_settings.fine_tune_mode == 'gradual':
+            # Start with all layers frozen
+            for param in embedding_model.parameters():
+                param.requires_grad = False
+            print("🌡️ Gradual fine-tuning mode: starting with all layers frozen")
+            # Gradual unfreezing will be handled by update_gradual_unfreezing
+
+        # Try to load existing fine-tuned model
+        fine_tuned_dir = os.path.join(
+            self.config.training_settings.fine_tuned_models_dir,
+            self.config.model_settings.embedding_type
+        )
+
+        if os.path.exists(fine_tuned_dir):
+            best_path = os.path.join(
+                fine_tuned_dir, 'best', 'embedding_model_best.pt')
+            if os.path.exists(best_path):
+                try:
+                    checkpoint = torch.load(best_path)
+                    embedding_model.load_state_dict(checkpoint['state_dict'])
+                    print(
+                        f"✅ Loaded best fine-tuned embedding model from {best_path}")
+                    return embedding_model
+                except Exception as e:
+                    print(f"⚠️ Could not load best model: {str(e)}")
+
+        return embedding_model
 
     def _create_attention(self) -> nn.Module:
         """Create attention module based on configuration"""
@@ -137,10 +185,16 @@ class BaseLSTM(nn.Module, ABC):
         last_hidden_size = self.config.model_settings.hidden_dims[-1] * (
             2 if self.config.model_settings.bidirectional else 1)
 
-        return nn.Sequential(
-            nn.Linear(last_hidden_size, self.config.model_settings.output_dim),
-            self.final_activation if self.final_activation is not None else nn.Identity()
-        )
+        # Create sequential layers without final activation
+        layers = [
+            nn.Linear(last_hidden_size, self.config.model_settings.output_dim)]
+
+        # Add final activation if specified
+        final_activation = self.config.model_settings.get_final_activation()
+        if final_activation is not None:
+            layers.append(final_activation)
+
+        return nn.Sequential(*layers)
 
     def apply_attention(self, x: torch.Tensor) -> torch.Tensor:
         """Apply attention mechanism to the input tensor"""
@@ -184,16 +238,38 @@ class BaseLSTM(nn.Module, ABC):
 
         projections = []
         input_size = self.config.model_settings.embedding_dim
+
+        # Create projections for each LSTM layer
         for hidden_size in self.config.model_settings.hidden_dims:
-            out_size = hidden_size * \
+            output_size = hidden_size * \
                 (2 if self.config.model_settings.bidirectional else 1)
-            if input_size != out_size:
-                projections.append(nn.Linear(input_size, out_size))
+            if input_size != output_size:
+                projections.append(nn.Linear(input_size, output_size))
             else:
                 projections.append(nn.Identity())
-            input_size = out_size
+            input_size = output_size
 
         return nn.ModuleList(projections)
+
+    def _create_layer_norms(self) -> Optional[nn.ModuleDict]:
+        """Create layer normalization layers for LSTM and FC layers"""
+        if not self.config.model_settings.use_layer_norm:
+            return None
+
+        layer_norms = nn.ModuleDict()
+
+        # Create layer norms for each LSTM layer
+        for i, hidden_size in enumerate(self.config.model_settings.hidden_dims):
+            output_size = hidden_size * \
+                (2 if self.config.model_settings.bidirectional else 1)
+            layer_norms[f'lstm_{i}'] = nn.LayerNorm(output_size)
+
+        # Create layer norm for final output
+        last_hidden_size = self.config.model_settings.hidden_dims[-1] * (
+            2 if self.config.model_settings.bidirectional else 1)
+        layer_norms['final'] = nn.LayerNorm(last_hidden_size)
+
+        return layer_norms
 
     @abstractmethod
     def forward(self, x: torch.Tensor,
@@ -271,3 +347,43 @@ class BaseLSTM(nn.Module, ABC):
         for layer in self.fc_layers:
             if isinstance(layer, nn.Linear):
                 init_layer(layer)
+
+    def update_gradual_unfreezing(self, epoch: int):
+        """Update which layers are frozen/unfrozen during gradual fine-tuning"""
+        if not self.config.model_settings.fine_tune_embedding:
+            return
+
+        if self.config.model_settings.fine_tune_mode != 'gradual':
+            return
+
+        # Get layers to unfreeze at current epoch
+        layers_to_unfreeze = self.config.model_settings.get_layers_to_unfreeze_at_epoch(
+            epoch)
+
+        # Track changes for logging
+        newly_unfrozen = []
+        total_unfrozen = []
+
+        # Update layer freezing status
+        for name, param in self.embedding_model.named_parameters():
+            layer_num = int(re.search(r'layer\.(\d+)\.',
+                            name).group(1)) if 'layer.' in name else -1
+            if layer_num in layers_to_unfreeze:
+                if not param.requires_grad:
+                    newly_unfrozen.append(layer_num)
+                param.requires_grad = True
+                total_unfrozen.append(layer_num)
+
+                # Apply layer-specific learning rate if using discriminative learning rates
+                if self.config.model_settings.use_discriminative_lr:
+                    layer_position = len(layers_to_unfreeze) - \
+                        layers_to_unfreeze.index(layer_num)
+                    param.lr_scale = self.config.model_settings.lr_decay_factor ** (
+                        layer_position - 1)
+            else:
+                param.requires_grad = False
+
+        # Log changes
+        if newly_unfrozen:
+            print(f"🔓 Epoch {epoch}: Unfroze layers {sorted(newly_unfrozen)}")
+        print(f"📊 Currently unfrozen layers: {sorted(total_unfrozen)}")

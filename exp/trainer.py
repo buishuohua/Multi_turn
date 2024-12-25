@@ -181,17 +181,13 @@ class Trainer:
         components.append(emb_name)
 
         # 4. Core Model Parameters
-        # Number of layers
         components.append(f"L{self.config.model_settings.num_layers}")
-        # Hidden dimension
         components.append(f"H{self.config.model_settings.init_hidden_dim}")
-        components.append(
-            f"M{self.config.tokenizer_settings.max_length}")  # Max length
+        components.append(f"M{self.config.tokenizer_settings.max_length}")
 
         # Add learning rate (with scientific notation for small values)
         lr = self.config.training_settings.learning_rate
         if lr < 0.01:
-            # Simplify scientific notation
             lr_str = f"{lr:.0e}".replace('e-0', 'e-')
         else:
             lr_str = f"{lr:.3f}".rstrip('0').rstrip('.')
@@ -201,8 +197,7 @@ class Trainer:
         components.append(f"Act{self.config.model_settings.activation[:4]}")
 
         # 5. Training Strategy
-        components.append(self.config.model_settings.loss.replace(
-            '_', ''))  # Loss function
+        components.append(self.config.model_settings.loss.replace('_', ''))
 
         # 6. Initialization Function
         init_map = {
@@ -218,7 +213,38 @@ class Trainer:
                                  self.config.model_settings.weight_init[:3])
         components.append(init_name)
 
-        # 7. Data Strategy (if any)
+        # 7. Fine-tuning Strategy
+        if self.config.model_settings.fine_tune_embedding:
+            ft_components = []
+            # Add fine-tuning mode
+            mode_map = {
+                'none': 'N',
+                'full': 'F',
+                'last_n': f'L{self.config.model_settings.num_frozen_layers}',
+                'selective': 'S',
+                'gradual': 'G'
+            }
+            ft_mode = mode_map.get(
+                self.config.model_settings.fine_tune_mode, 'X')
+            ft_components.append(f"FT{ft_mode}")
+
+            # Add discriminative learning rate info if used
+            if self.config.model_settings.use_discriminative_lr:
+                ft_components.append(
+                    f"D{self.config.model_settings.lr_decay_factor:.1f}")
+
+            # Add fine-tuning learning rate if different from base
+            if hasattr(self.config.model_settings, 'fine_tune_lr'):
+                ft_lr = self.config.model_settings.fine_tune_lr
+                if ft_lr < 0.01:
+                    ft_lr_str = f"{ft_lr:.0e}".replace('e-0', 'e-')
+                else:
+                    ft_lr_str = f"{ft_lr:.3f}".rstrip('0').rstrip('.')
+                ft_components.append(f"LR{ft_lr_str}")
+
+            components.append('_'.join(ft_components))
+
+        # 8. Data Strategy (if any)
         if self.config.data_settings.imbalanced_strategy != 'none':
             imbal_map = {
                 'weighted_sampler': 'ws',
@@ -233,12 +259,10 @@ class Trainer:
                                        self.config.data_settings.imbalanced_strategy[:3])
             components.append(imbal_code)
 
-        # 8. Special Features (as flags)
+        # 9. Special Features (as flags)
         flags = []
         if self.config.model_settings.use_attention:
             flags.append('A')  # Attention
-        if self.config.model_settings.fine_tune_embedding:
-            flags.append('FT')  # Fine-tuning
         if self.config.model_settings.use_layer_norm:
             flags.append('LN')  # Layer Normalization
         if flags:
@@ -352,12 +376,12 @@ class Trainer:
             'epoch': epoch + 1,
             'state_dict': self.model.embedding_model.state_dict(),
             'config': self.config.model_settings.to_dict(),
-            'embedding_type': self.config.model_settings.embedding_type
+            'embedding_type': self.config.model_settings.embedding_type,
+            'experiment_name': self.experiment_name  # Add experiment name to state
         }
 
         # 1. Save latest version
-        latest_dir = os.path.join(self.fine_tuned_dir, 'latest')
-        self._ensure_dir_exists(latest_dir)
+        latest_dir = os.path.join(self.experiment_fine_tuned_dir, 'latest')
         latest_path = os.path.join(latest_dir, 'embedding_model_latest.pt')
         torch.save(embedding_state, latest_path)
         print(
@@ -365,8 +389,7 @@ class Trainer:
 
         # 2. Save best version if applicable
         if is_best:
-            best_dir = os.path.join(self.fine_tuned_dir, 'best')
-            self._ensure_dir_exists(best_dir)
+            best_dir = os.path.join(self.experiment_fine_tuned_dir, 'best')
             best_path = os.path.join(best_dir, 'embedding_model_best.pt')
             torch.save(embedding_state, best_path)
             print(
@@ -374,8 +397,8 @@ class Trainer:
 
         # 3. Save periodic checkpoint based on frequency
         if (epoch + 1) % self.config.training_settings.checkpoint_freq == 0:
-            checkpoint_dir = os.path.join(self.fine_tuned_dir, 'checkpoints')
-            self._ensure_dir_exists(checkpoint_dir)
+            checkpoint_dir = os.path.join(
+                self.experiment_fine_tuned_dir, 'checkpoints')
             checkpoint_path = os.path.join(
                 checkpoint_dir,
                 f'embedding_model_epoch_{epoch + 1}.pt'
@@ -403,7 +426,6 @@ class Trainer:
                     yticklabels=self.config.data_settings.class_names,
                     square=True,
                     cbar_kws={
-                        'label': 'Count',
                         'orientation': 'vertical',
                         'pad': 0.02,    # Reduce padding
                         'fraction': 0.046  # Make colorbar thinner
@@ -415,7 +437,6 @@ class Trainer:
         # Get the colorbar and adjust its label size
         cbar = ax.collections[0].colorbar
         cbar.ax.tick_params(labelsize=10)
-        cbar.set_label('Count', size=10)
 
         # Adjust label sizes and rotation
         plt.xticks(rotation=45, color='black', fontsize=8)
@@ -466,12 +487,14 @@ class Trainer:
         save_path = os.path.join(save_dir, filename)
 
         try:
-            # Ensure parent directory exists
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            # Use class method to ensure directory exists
+            self._ensure_dir_exists(os.path.dirname(save_path))
 
             # Save figure
-            plt.savefig(save_path, bbox_inches='tight',
-                        dpi=300, facecolor='white')
+            plt.savefig(save_path,
+                        bbox_inches='tight',
+                        dpi=300,
+                        facecolor='white')
         except Exception as e:
             print(f"❌ Error saving confusion matrix")
             print(f"Attempted path: {save_path}")
@@ -502,7 +525,7 @@ class Trainer:
             'grid.color': 'gray',
             'grid.linewidth': 0.5,
             'lines.linewidth': 1.5,
-            'lines.markersize': 4,
+            'lines.markersize': 2,
             'xtick.direction': 'out',
             'ytick.direction': 'out',
             'xtick.major.width': 1.0,
@@ -568,25 +591,25 @@ class Trainer:
                     if 'macro' in m:
                         ax.plot(train_metric, linestyle=linestyle, marker=marker,
                                 label='Train (Macro)', color='#1f77b4',
-                                markersize=5, linewidth=1.5, markeredgewidth=1.5)
+                                markersize=2, linewidth=1.5, markeredgewidth=1.5)
                         ax.plot(val_metric, linestyle=linestyle, marker=marker,
                                 label='Val (Macro)', color='#7cc7ff',
-                                markersize=5, linewidth=1.5, markeredgewidth=1.5)
+                                markersize=2, linewidth=1.5, markeredgewidth=1.5)
                     else:
                         ax.plot(train_metric, linestyle=linestyle, marker=marker,
                                 label='Train (Micro)', color='#d62728',
-                                markersize=5, linewidth=1.5, markeredgewidth=1.5)
+                                markersize=2, linewidth=1.5, markeredgewidth=1.5)
                         ax.plot(val_metric, linestyle=linestyle, marker=marker,
                                 label='Val (Micro)', color='#ff9999',
-                                markersize=5, linewidth=1.5, markeredgewidth=1.5)
+                                markersize=2, linewidth=1.5, markeredgewidth=1.5)
             else:
                 train_metric = [h[f'train_{metric}']
                                 for h in self.metrics_history]
                 val_metric = [h[f'val_{metric}'] for h in self.metrics_history]
                 ax.plot(train_metric, '-o', label='Train', color='#1f77b4',
-                        markersize=5, linewidth=1.5, markeredgewidth=1.5)
+                        markersize=2, linewidth=1.5, markeredgewidth=1.5)
                 ax.plot(val_metric, '-o', label='Val', color='#7cc7ff',
-                        markersize=5, linewidth=1.5, markeredgewidth=1.5)
+                        markersize=2, linewidth=1.5, markeredgewidth=1.5)
 
             # Enhanced grid and axis styling
             ax.grid(True, linestyle='--', alpha=0.3,
@@ -618,7 +641,7 @@ class Trainer:
             legend = ax.legend(
                 facecolor='white',
                 edgecolor='none',
-                loc='upper right',
+                loc='upper left',
                 bbox_to_anchor=(0.98, 0.98),
                 framealpha=0.9,
                 ncol=1,
@@ -727,11 +750,11 @@ class Trainer:
                   ha='center',      # Ensure horizontal center alignment
                   x=0.5)           # Set x position to center
 
-        # Set legend with black text in upper right
+        # Set legend with black text in upper left
         legend = plt.legend(
             facecolor='white',
             edgecolor='black',
-            loc='upper right',         # Ensure legend is at upper right
+            loc='upper left',         # Ensure legend is at upper left
             fontsize=10,
             bbox_to_anchor=(1.0, 1.0)  # Fine-tune position
         )
@@ -760,7 +783,7 @@ class Trainer:
 
         try:
             # Ensure parent directory exists
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            self._ensure_dir_exists(save_path)
 
             # Save figure
             plt.savefig(save_path, bbox_inches='tight',
@@ -773,16 +796,42 @@ class Trainer:
         finally:
             plt.close()
 
-    def _print_metrics(self, metrics, phase='train'):
-        """Print metrics in a formatted way"""
-        print(f"\n📊 {phase.capitalize()} Metrics:")
-        print(
-            f"Loss: {metrics['loss']:.4f} | Accuracy: {metrics['accuracy']:.4f}")
-        print(
-            f"Macro → P: {metrics['precision_macro']:.4f} | R: {metrics['recall_macro']:.4f} | F1: {metrics['f1_macro']:.4f}")
-        print(
-            f"Micro → P: {metrics['precision_micro']:.4f} | R: {metrics['recall_micro']:.4f} | F1: {metrics['f1_micro']:.4f}")
-        print(f"\n")
+    def _print_metrics(self, phase, metrics, epoch, batch_idx=None):
+        """Print metrics in a clean, organized format with vertical alignment"""
+        if batch_idx is not None:
+            header = f"📊 {phase.capitalize()} Metrics (Epoch {epoch + 1}, Batch {batch_idx})"
+        else:
+            header = f"📊 {phase.capitalize()} Metrics (Epoch {epoch + 1})"
+
+        print(f"\n{header}")
+        print(f"{'═' * 65}")  # Top border
+
+        # Format each metric with consistent width
+        metrics_format = {
+            'Accuracy': f"{metrics['accuracy']:.4f}",
+            'F1 Macro': f"{metrics['f1_macro']:.4f}",
+            'F1 Micro': f"{metrics['f1_micro']:.4f}",
+            'Precision Macro': f"{metrics['precision_macro']:.4f}",
+            'Precision Micro': f"{metrics['precision_micro']:.4f}",
+            'Recall Macro': f"{metrics['recall_macro']:.4f}",
+            'Recall Micro': f"{metrics['recall_micro']:.4f}"
+        }
+
+        # Print metrics in aligned columns with separators
+        print(f"│ {'Accuracy':<13}│ {metrics_format['Accuracy']:<13}│")
+        print(f"{'─' * 65}")  # Separator
+
+        print(f"│ {'F1 Macro':<13}│ {metrics_format['F1 Macro']:<13}│ "
+              f"{'F1 Micro':<13}│ {metrics_format['F1 Micro']:<13}│")
+        print(f"{'─' * 65}")  # Separator
+
+        print(f"│ {'Prec Macro':<13}│ {metrics_format['Precision Macro']:<13}│ "
+              f"{'Prec Micro':<13}│ {metrics_format['Precision Micro']:<13}│")
+        print(f"{'─' * 65}")  # Separator
+
+        print(f"│ {'Recall Macro':<13}│ {metrics_format['Recall Macro']:<13}│ "
+              f"{'Recall Micro':<13}│ {metrics_format['Recall Micro']:<13}│")
+        print(f"{'═' * 65}")  # Bottom border
 
     def train(self):
         """Main training loop"""
@@ -793,7 +842,8 @@ class Trainer:
                 checkpoint = self.load_checkpoint(latest_checkpoint)
                 if checkpoint is not None:
                     self.start_epoch = checkpoint['epoch'] + 1
-                    print(f"✅ Resuming training from epoch {self.start_epoch + 1}")
+                    print(
+                        f"✅ Resuming training from epoch {self.start_epoch + 1}")
                 else:
                     print("⚠️ Failed to load checkpoint, starting from scratch")
                     self.start_epoch = 0
@@ -806,26 +856,37 @@ class Trainer:
         # 2. Main training loop
         for epoch in range(self.start_epoch, self.config.training_settings.num_epochs):
             print(f"\n{'─'*50}")
-            print(f"⏳ Epoch {epoch + 1}/{self.config.training_settings.num_epochs}")
+            print(
+                f"⏳ Epoch {epoch + 1}/{self.config.training_settings.num_epochs}")
             print(f"{'─'*50}")
 
             # Training and validation phases
             train_metrics, train_preds, train_labels = self.train_epoch()
-            val_metrics, val_preds, val_labels = self.evaluate(self.val_loader, 'val')
+            val_metrics, val_preds, val_labels = self.evaluate(
+                self.val_loader, 'val')
 
             # Update tracking variables
             self._update_tracking(train_metrics, val_metrics)
-            
+
             # 3. Save latest state
-            self._save_latest_state(epoch, train_labels, train_preds, val_labels, val_preds)
+            self._save_latest_state(
+                epoch, train_labels, train_preds, val_labels, val_preds)
+            self._save_metrics_data(
+                epoch, train_metrics, val_metrics, save_type='latest')
 
             # 4. Save periodic checkpoints
             if (epoch + 1) % self.config.training_settings.checkpoint_freq == 0:
-                self._save_checkpoint_state(epoch, train_labels, train_preds, val_labels, val_preds)
+                self._save_checkpoint_state(
+                    epoch, train_labels, train_preds, val_labels, val_preds)
+                self._save_metrics_data(
+                    epoch, train_metrics, val_metrics, save_type='checkpoint')
 
             # 5. Handle best model saving
             if val_metrics['loss'] < self.best_val_loss:
-                self._save_best_state(epoch, train_labels, train_preds, val_labels, val_preds, val_metrics['loss'])
+                self._save_best_state(
+                    epoch, train_labels, train_preds, val_labels, val_preds, val_metrics['loss'])
+                self._save_metrics_data(
+                    epoch, train_metrics, val_metrics, save_type='best')
 
             # 6. Early stopping check
             if self._check_early_stopping(val_metrics['loss']):
@@ -833,7 +894,10 @@ class Trainer:
                 break
 
         # 7. Save final state
-        self._save_final_state(train_labels, train_preds, val_labels, val_preds)
+        self._save_final_state(train_labels, train_preds,
+                               val_labels, val_preds)
+        self._save_metrics_data(epoch, train_metrics,
+                                val_metrics, save_type='final')
 
         return self.metrics_history
 
@@ -849,21 +913,33 @@ class Trainer:
         """Save latest model state and figures"""
         latest_dir = os.path.join(self.figures_dir, 'latest')
         self._ensure_dir_exists(latest_dir)
-        self._save_epoch_figures(train_labels, train_preds, val_labels, val_preds, latest_dir)
+        self._save_epoch_figures(
+            train_labels, train_preds, val_labels, val_preds, latest_dir)
         self.save_checkpoint(epoch, self.val_losses[-1], is_best=False)
 
     def _save_checkpoint_state(self, epoch, train_labels, train_preds, val_labels, val_preds):
         """Save periodic checkpoint state and figures"""
-        checkpoint_figures_dir = os.path.join(self.figures_dir, 'checkpoints', f'epoch_{epoch + 1}')
+        # Create checkpoint directory paths
+        checkpoint_figures_dir = os.path.join(
+            self.figures_dir, 'checkpoints', f'epoch_{epoch + 1}')
+
+        # Ensure directories exist
         self._ensure_dir_exists(checkpoint_figures_dir)
-        self._save_epoch_figures(train_labels, train_preds, val_labels, val_preds, checkpoint_figures_dir)
+
+        self.save_checkpoint(epoch, self.val_losses[-1], is_best=False)
+
+        # Save figures
+        self._save_epoch_figures(
+            train_labels, train_preds, val_labels, val_preds, checkpoint_figures_dir
+        )
 
     def _save_best_state(self, epoch, train_labels, train_preds, val_labels, val_preds, val_loss):
         """Save best model state and figures"""
         self.best_val_loss = val_loss
         best_dir = os.path.join(self.figures_dir, 'best')
         self._ensure_dir_exists(best_dir)
-        self._save_epoch_figures(train_labels, train_preds, val_labels, val_preds, best_dir)
+        self._save_epoch_figures(
+            train_labels, train_preds, val_labels, val_preds, best_dir)
         self.save_checkpoint(epoch, val_loss, is_best=True)
         print(f"🏆 New best model achieved at epoch {epoch + 1}!")
 
@@ -871,46 +947,41 @@ class Trainer:
         """Save final model state and figures"""
         final_dir = os.path.join(self.figures_dir, 'final')
         self._ensure_dir_exists(final_dir)
-        self._save_epoch_figures(train_labels, train_preds, val_labels, val_preds, final_dir)
+        self._save_epoch_figures(
+            train_labels, train_preds, val_labels, val_preds, final_dir)
 
     def train_epoch(self):
-        """Training loop for one epoch"""
+        """Train for one epoch"""
         self.model.train()
+        train_labels, train_preds = [], []
         total_loss = 0
         num_samples = 0
-        all_preds = []
-        all_labels = []
-
-        for batch in tqdm(self.train_loader, desc='Training'):
+        for batch_idx, batch in enumerate(tqdm(self.train_loader, desc='Training')):
             self.optimizer.zero_grad()
 
             # Move batch to device
             inputs = batch[0].to(self.config.training_settings.device)
             labels = batch[1].to(self.config.training_settings.device)
 
-            # Create attention mask for padding tokens if model supports it
-            attention_mask = (inputs != 0).to(
-                self.config.training_settings.device)
+            outputs, activations = self.model(inputs)
 
-            # Forward pass - check if model accepts attention_mask
-            try:
-                outputs, _ = self.model(inputs, attention_mask=attention_mask)
-            except TypeError:
-                # If model doesn't accept attention_mask, call without it
-                outputs, _ = self.model(inputs)
-
-            # Handle loss calculation based on task type
-            if self.config.training_settings.task_type == 'classification':
-                # For classification, CrossEntropyLoss expects class indices, not one-hot
+            if self.config.model_settings.final_activation == 'softmax':
                 loss = self.criterion(outputs, labels)
                 preds = torch.argmax(outputs, dim=1)
-            else:
-                # For other tasks, might need different handling
+            elif self.config.model_settings.final_activation == 'sigmoid':
+                loss = self.criterion(outputs, labels.float())
+                preds = (outputs > 0.5).long()
+            else:  # 'linear' or no activation
                 loss = self.criterion(outputs, labels)
-                preds = outputs
+                preds = torch.argmax(outputs, dim=1)
 
-            # Backward pass
+                preds = torch.argmax(outputs, dim=1)
+
             loss.backward()
+
+            # Add monitoring call here
+            self._monitor_training_dynamics(
+                len(self.metrics_history), batch_idx, loss.item(), outputs, activations)
 
             # Gradient clipping if configured
             if self.config.training_settings.gradient_clip:
@@ -927,23 +998,28 @@ class Trainer:
             num_samples += batch_size
 
             # Store predictions and labels for metric calculation
-            all_preds.extend(preds.cpu().detach().numpy())
-            all_labels.extend(labels.cpu().detach().numpy())
+            labels_np = labels.detach().cpu().numpy().astype(np.int64)
+            preds_np = preds.detach().cpu().numpy().astype(np.int64)
+            train_labels.extend(labels_np)
+            train_preds.extend(preds_np)
 
         # Calculate average loss and metrics
         avg_loss = total_loss / num_samples
-        metrics = calculate_metrics(np.array(all_labels), np.array(all_preds))
+
+        metrics = calculate_metrics(train_labels, train_preds)
         metrics['loss'] = avg_loss
 
-        return metrics, all_preds, all_labels
+        # Calculate and print metrics only at epoch end
+        self._print_metrics('train', metrics, len(self.metrics_history))
+
+        return metrics, train_preds, train_labels
 
     def evaluate(self, loader, phase='val'):
-        """Evaluation loop"""
+        """Validate the model"""
         self.model.eval()
-        total_loss = 0
+        total_loss = 0  # Initialize total_loss here
         num_samples = 0
-        all_preds = []
-        all_labels = []
+        val_labels, val_preds = [], []
 
         with torch.no_grad():
             for batch in tqdm(loader, desc=f'Evaluating ({phase})'):
@@ -963,47 +1039,37 @@ class Trainer:
                 num_samples += batch_size
 
                 preds = torch.argmax(outputs, dim=1)
-                all_preds.extend(preds.cpu().numpy())
-                all_labels.extend(labels.cpu().numpy())
+                val_labels.extend(labels.cpu().numpy())
+                val_preds.extend(preds.cpu().numpy())
 
         # Calculate metrics
-        metrics = calculate_metrics(all_labels, all_preds)
+        metrics = calculate_metrics(val_labels, val_preds)
         metrics['loss'] = total_loss / num_samples
 
-        return metrics, all_preds, all_labels
+        # Calculate and print validation metrics
+        self._print_metrics('val', metrics, len(self.metrics_history))
 
-    def save_metrics(self, metrics, epoch, phase):
-        """Save metrics to JSON file"""
-        if isinstance(epoch, int):
-            # For periodic saves
-            if (epoch) % self.config.training_settings.checkpoint_freq == 0:
-                _, _, epoch_metrics_dir = self._create_epoch_directories(epoch)
-                metrics_file = os.path.join(
-                    epoch_metrics_dir,
-                    f'{phase}_metrics_{self.experiment_name}.json'
-                )
-                with open(metrics_file, 'w') as f:
-                    json.dump(metrics, f, indent=4)
-        else:
-            # For 'latest', 'best', or 'final' saves
-            metrics_dir = os.path.join(self.results_dir, 'metrics', epoch)
-            self._ensure_dir_exists(metrics_dir)
-            metrics_file = os.path.join(
-                metrics_dir,
-                f'{phase}_metrics_{self.experiment_name}.json'
-            )
-            with open(metrics_file, 'w') as f:
-                json.dump(metrics, f, indent=4)
+        return metrics, val_labels, val_preds
 
     def _setup_fine_tuned_directories(self):
         """Set up directories for fine-tuned embedding models"""
-        # Create main directory
+        # Create main directory for embedding type
         self._ensure_dir_exists(self.fine_tuned_dir)
+
+        # Create experiment-specific directory
+        self.experiment_fine_tuned_dir = os.path.join(
+            self.fine_tuned_dir,
+            self.experiment_name
+        )
+        self._ensure_dir_exists(self.experiment_fine_tuned_dir)
 
         # Create subdirectories for checkpoints and latest models
         self._ensure_dir_exists(os.path.join(
-            self.fine_tuned_dir, 'checkpoints'))
-        self._ensure_dir_exists(os.path.join(self.fine_tuned_dir, 'latest'))
+            self.experiment_fine_tuned_dir, 'checkpoints'))
+        self._ensure_dir_exists(os.path.join(
+            self.experiment_fine_tuned_dir, 'latest'))
+        self._ensure_dir_exists(os.path.join(
+            self.experiment_fine_tuned_dir, 'best'))
 
     def _print_experiment_info(self):
         """Print detailed experiment configuration and setup"""
@@ -1103,6 +1169,18 @@ class Trainer:
         print(f"- Test samples: {len(self.test_loader.dataset)}")
         print(f"- Number of batches (train): {len(self.train_loader)}")
 
+        # Add fine-tuning information
+        if self.config.model_settings.fine_tune_embedding:
+            print("\n🔄 Fine-tuning Configuration:")
+            print(f"- Mode: {self.config.model_settings.fine_tune_mode}")
+            print(f"- Fine-tuned Models Dir: {self.experiment_fine_tuned_dir}")
+            if self.config.model_settings.use_discriminative_lr:
+                print(
+                    f"- Discriminative LR Decay: {self.config.model_settings.lr_decay_factor}")
+            if hasattr(self.config.model_settings, 'fine_tune_lr'):
+                print(
+                    f"- Fine-tuning Learning Rate: {self.config.model_settings.fine_tune_lr}")
+
         print("\n" + "="*50 + "\n")
 
     def _find_latest_checkpoint(self):
@@ -1171,30 +1249,33 @@ class Trainer:
         dir_type = 'latest' if 'latest' in save_dir else 'best' if 'best' in save_dir else 'checkpoint'
         epoch = len(self.train_losses)  # Current epoch
 
-        # Always save metrics plot
-        self.plot_metrics(save_dir=save_dir)
-        print(
-            f"📈 Saved {'latest' if dir_type == 'latest' else dir_type} metrics plot at epoch {epoch}")
+        # Ensure the save directory exists
+        self._ensure_dir_exists(save_dir)
 
-        # Save confusion matrices and class performance plots only for latest
-        if dir_type == 'latest':
+        # Save confusion matrices and class performance plots
+        if dir_type in ['latest', 'best', 'checkpoint']:
             # Save confusion matrices
             self.plot_confusion_matrix(
                 train_labels, train_preds, save_dir=save_dir, prefix='train')
             self.plot_confusion_matrix(
                 val_labels, val_preds, save_dir=save_dir, prefix='val')
-            print(f"🔄 Saved latest confusion matrices at epoch {epoch}")
+            print(f"🔄 Saved {dir_type} confusion matrices at epoch {epoch}")
 
             # Save class performance plots
             self.plot_class_performance(
                 train_labels, train_preds, save_dir=save_dir, prefix='train')
             self.plot_class_performance(
                 val_labels, val_preds, save_dir=save_dir, prefix='val')
-            print(f"📊 Saved latest performance plots at epoch {epoch}")
+            print(f"📊 Saved {dir_type} performance plots at epoch {epoch}")
 
-        # Create and save whole period metrics if we're at a checkpoint epoch
-        if dir_type == 'checkpoint' or dir_type == 'best' or dir_type == 'latest':
-            self.save_whole_period_metrics()
+            # Save activation statistics plot
+            if hasattr(self, 'activation_stats') and self.activation_stats:
+                self.plot_activation_stats(save_dir)
+                print(
+                    f"📈 Saved {dir_type} activation statistics at epoch {epoch}")
+
+        # Create and save whole period metrics
+        self.save_whole_period_metrics()
 
     def save_whole_period_metrics(self):
         """Create and save a metrics plot for the entire training period so far"""
@@ -1237,9 +1318,10 @@ class Trainer:
         for idx, (metric, title) in enumerate(metric_pairs, 1):
             ax = plt.subplot(2, 2, idx)
             ax.set_facecolor('white')
-            ax.grid(True, linestyle='--', alpha=0.7)
+            ax.grid(True, linestyle='--', alpha=0.3)
 
-            epochs = range(1, len(self.metrics_history) + 1)
+            # Use integer x-axis
+            epochs = range(len(self.metrics_history))
 
             if isinstance(metric, tuple):
                 # Plot macro metrics
@@ -1247,40 +1329,63 @@ class Trainer:
                                for m in self.metrics_history]
                 val_macro = [m[f'val_{metric[0]}']
                              for m in self.metrics_history]
-                ax.plot(epochs, train_macro, 'b-',
-                        label=f'Train (Macro)', marker='o', markersize=2)
-                ax.plot(epochs, val_macro, 'c-',
-                        label=f'Val (Macro)', marker='o', markersize=2)
+                ax.plot(epochs, train_macro, '-', color='#1f77b4',
+                        label='Train (Macro)', marker='o', markersize=2)
+                ax.plot(epochs, val_macro, '-', color='#7cc7ff',
+                        label='Val (Macro)', marker='o', markersize=2)
 
                 # Plot micro metrics
                 train_micro = [m[f'train_{metric[1]}']
                                for m in self.metrics_history]
                 val_micro = [m[f'val_{metric[1]}']
                              for m in self.metrics_history]
-                ax.plot(epochs, train_micro, 'r-',
-                        label=f'Train (Micro)', marker='s', markersize=2)
-                ax.plot(epochs, val_micro, 'salmon',
-                        label=f'Val (Micro)', marker='s', markersize=2)
+                ax.plot(epochs, train_micro, '-', color='#d62728',
+                        label='Train (Micro)', marker='s', markersize=2)
+                ax.plot(epochs, val_micro, '-', color='#ff9999',
+                        label='Val (Micro)', marker='s', markersize=2)
             else:
                 train_metric = [m[f'train_{metric}']
                                 for m in self.metrics_history]
                 val_metric = [m[f'val_{metric}']
                               for m in self.metrics_history]
-                ax.plot(epochs, train_metric, 'b-',
+                ax.plot(epochs, train_metric, '-', color='#1f77b4',
                         label='Train', marker='o', markersize=2)
-                ax.plot(epochs, val_metric, 'c-',
+                ax.plot(epochs, val_metric, '-', color='#7cc7ff',
                         label='Val', marker='o', markersize=2)
 
-            ax.set_xlabel('Epoch')
-            ax.set_ylabel('Score')
-            ax.set_title(title)
-            ax.legend(loc='upper left')
-            ax.set_ylim(0, 1)
+            # Set integer ticks on x-axis
+            ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
 
+            # Customize axis and labels
+            ax.set_xlabel('Epoch', fontsize=11, color='black', labelpad=8)
+            ax.set_ylabel('Score', fontsize=11, color='black', labelpad=8)
+            ax.set_title(title, pad=10, fontsize=12,
+                         fontweight='bold', color='black')
+            ax.set_ylim(0.0, 1.0)
+
+            # Adjust legend position and parameters
+            legend = ax.legend(
+                facecolor='white',
+                edgecolor='none',
+                loc='upper left',
+                bbox_to_anchor=(0.02, 0.98),
+                framealpha=0.9,
+                ncol=1
+            )
+            plt.setp(legend.get_texts(), color='black')
+
+        # Adjust subplot spacing to ensure legends are visible
         plt.tight_layout()
-        plt.subplots_adjust(top=0.85)
+        plt.subplots_adjust(
+            top=0.85,      # Keep space for main title
+            bottom=0.08,   # Space at bottom
+            left=0.08,     # Space at left
+            right=0.98,    # Space at right
+            hspace=0.25,   # Horizontal space between subplots
+            wspace=0.20    # Vertical space between subplots
+        )
 
-        # Save in the main figures directory
+        # Save figure
         save_path = os.path.join(
             self.figures_dir, f'metrics_whole_period_{self.experiment_name}.png')
         plt.savefig(save_path,
@@ -1318,3 +1423,238 @@ class Trainer:
         except Exception as e:
             print(f"❌ Error loading fine-tuned embedding model: {str(e)}")
             raise
+
+    def _monitor_training_dynamics(self, epoch: int, batch_idx: int, loss: float, outputs: torch.Tensor, activations: dict):
+        """Monitor training dynamics including gradients, activations, and loss patterns"""
+        # Only monitor every n batches to reduce overhead
+        monitor_freq = 100  # Adjust as needed
+        if batch_idx % monitor_freq != 0:
+            return
+
+        print(
+            f"\n📊 Training Dynamics Monitor (Epoch {epoch + 1}, Batch {batch_idx}):")
+
+        # 1. Monitor Loss
+        if loss > 1e3:  # Adjust threshold as needed
+            print(f"⚠️ High loss detected: {loss:.4f}")
+
+        # 2. Monitor Gradients
+        grad_stats = {name: [] for name in ['lstm', 'fc', 'attention']}
+        grad_norms = {name: [] for name in ['lstm', 'fc', 'attention']}
+
+        for name, param in self.model.named_parameters():
+            if param.grad is not None:
+                grad_norm = param.grad.norm().item()
+
+                # Categorize parameter
+                if 'lstm' in name:
+                    grad_stats['lstm'].append(param.grad.abs().mean().item())
+                    grad_norms['lstm'].append(grad_norm)
+                elif 'fc' in name:
+                    grad_stats['fc'].append(param.grad.abs().mean().item())
+                    grad_norms['fc'].append(grad_norm)
+                elif 'attention' in name:
+                    grad_stats['attention'].append(
+                        param.grad.abs().mean().item())
+                    grad_norms['attention'].append(grad_norm)
+
+                # Check for gradient explosion
+                if grad_norm > 10:  # Adjust threshold as needed
+                    print(f"⚠️ Large gradient in {name}: {grad_norm:.4f}")
+                # Check for gradient vanishing
+                elif grad_norm < 1e-7:  # Adjust threshold as needed
+                    print(f"⚠️ Vanishing gradient in {name}: {grad_norm:.4f}")
+
+        # Print gradient statistics
+        for layer_type in grad_stats:
+            if grad_stats[layer_type]:
+                mean_grad = sum(grad_stats[layer_type]) / \
+                    len(grad_stats[layer_type])
+                max_norm = max(grad_norms[layer_type]
+                               ) if grad_norms[layer_type] else 0
+                print(
+                    f"{layer_type.upper()} - Mean Grad: {mean_grad:.2e}, Max Norm: {max_norm:.2e}")
+
+        # 3. Monitor Activations
+        if activations:
+            for layer_name, activation in activations.items():
+                if activation is not None:
+                    act_mean = activation.abs().mean().item()
+                    act_std = activation.std().item()
+                    print(f"Activations {layer_name}:")
+                    print(f"  Mean: {act_mean:.4f}, Std: {act_std:.4f}")
+
+                    # Check for activation saturation
+                    if act_mean > 0.9:  # Adjust threshold as needed
+                        print(
+                            f"⚠️ Possible activation saturation in {layer_name}")
+                    elif act_mean < 0.1:  # Adjust threshold as needed
+                        print(f"⚠️ Low activation values in {layer_name}")
+
+        # 4. Monitor Output Distribution
+        if outputs is not None:
+            output_mean = outputs.abs().mean().item()
+            output_std = outputs.std().item()
+            print(f"Outputs - Mean: {output_mean:.4f}, Std: {output_std:.4f}")
+
+            # Check for potential issues in output distribution
+            if output_std < 1e-4:
+                print("⚠️ Very low output variance detected")
+            if torch.isnan(outputs).any():
+                print("⚠️ NaN values detected in outputs")
+
+        print("=" * 50)
+
+    def plot_activation_stats(self, save_dir):
+        """Plot activation statistics over time"""
+        plt.figure(figsize=(10, 12), facecolor='white')
+
+        # Plot means
+        plt.subplot(2, 1, 1)
+        plt.grid(True, linestyle='--', alpha=0.3)
+        plt.gca().set_facecolor('white')
+
+        for layer in ['first_layer', 'middle_layer', 'last_layer']:
+            means = [stats[layer]['mean']
+                     for stats in self.activation_stats if stats[layer]]
+            if means:  # Only plot if we have data
+                plt.plot(means, label=f'{layer} mean',
+                         marker='o', markersize=2)
+
+        plt.title('Activation Means During Training', pad=10,
+                  fontsize=12, fontweight='bold', color='black')
+        plt.xlabel('Steps (x10)', fontsize=11, color='black')
+        plt.ylabel('Mean Activation', fontsize=11, color='black')
+        plt.legend(
+            loc='upper left',
+            bbox_to_anchor=(0.02, 0.98),
+            facecolor='white',
+            edgecolor='none',
+            framealpha=0.9
+        )
+
+        # Plot standard deviations
+        plt.subplot(2, 1, 2)
+        plt.grid(True, linestyle='--', alpha=0.3)
+        plt.gca().set_facecolor('white')
+
+        for layer in ['first_layer', 'middle_layer', 'last_layer']:
+            stds = [stats[layer]['std']
+                    for stats in self.activation_stats if stats[layer]]
+            if stds:  # Only plot if we have data
+                plt.plot(stds, label=f'{layer} std', marker='o', markersize=2)
+
+        plt.title('Activation Standard Deviations During Training',
+                  pad=10, fontsize=12, fontweight='bold', color='black')
+        plt.xlabel('Steps (x10)', fontsize=11, color='black')
+        plt.ylabel('Activation std', fontsize=11, color='black')
+        plt.legend(
+            loc='upper left',
+            bbox_to_anchor=(0.02, 0.98),
+            facecolor='white',
+            edgecolor='none',
+            framealpha=0.9
+        )
+
+        plt.tight_layout()
+        plt.savefig(
+            os.path.join(save_dir, 'activation_stats.png'),
+            dpi=300,
+            bbox_inches='tight',
+            facecolor='white',
+            edgecolor='none',
+            pad_inches=0.1
+        )
+        plt.close()
+
+    def plot_gradient_norms(self, save_dir):
+        """Plot gradient norms over time"""
+        plt.figure(figsize=(10, 6), facecolor='white')
+        plt.grid(True, linestyle='--', alpha=0.3)
+        plt.gca().set_facecolor('white')
+
+        for layer_type in ['lstm', 'fc', 'attention']:
+            norms = [stats[layer_type]
+                     for stats in self.gradient_norms if stats[layer_type]]
+            if norms:  # Only plot if we have data
+                plt.plot(
+                    norms, label=f'{layer_type.upper()} layers', marker='o', markersize=2)
+
+        plt.title('Gradient Norms During Training', pad=10,
+                  fontsize=12, fontweight='bold', color='black')
+        plt.xlabel('Steps (x10)', fontsize=11, color='black')
+        plt.ylabel('Gradient Norm', fontsize=11, color='black')
+        plt.legend(
+            loc='upper left',
+            bbox_to_anchor=(0.02, 0.98),
+            facecolor='white',
+            edgecolor='none',
+            framealpha=0.9
+        )
+
+        plt.tight_layout()
+        plt.savefig(
+            os.path.join(save_dir, 'gradient_norms.png'),
+            dpi=300,
+            bbox_inches='tight',
+            facecolor='white',
+            edgecolor='none',
+            pad_inches=0.1
+        )
+        plt.close()
+
+    def _save_metrics_data(self, epoch, train_metrics, val_metrics, save_type='latest'):
+        """
+        Save metrics data in appropriate directory
+        Args:
+            epoch: Current epoch number
+            train_metrics: Dictionary containing training metrics
+            val_metrics: Dictionary containing validation metrics
+            save_type: 'latest', 'best', 'checkpoint', or 'final'
+        """
+        # Prepare metrics data
+        metrics_data = {
+            'train_metrics': {
+                'loss': self.train_losses[-1],
+                'accuracy': train_metrics['accuracy'],
+                'precision_macro': train_metrics['precision_macro'],
+                'precision_micro': train_metrics['precision_micro'],
+                'recall_macro': train_metrics['recall_macro'],
+                'recall_micro': train_metrics['recall_micro'],
+                'f1_macro': train_metrics['f1_macro'],
+                'f1_micro': train_metrics['f1_micro']
+            },
+            'val_metrics': {
+                'loss': self.val_losses[-1],
+                'accuracy': val_metrics['accuracy'],
+                'precision_macro': val_metrics['precision_macro'],
+                'precision_micro': val_metrics['precision_micro'],
+                'recall_macro': val_metrics['recall_macro'],
+                'recall_micro': val_metrics['recall_micro'],
+                'f1_macro': val_metrics['f1_macro'],
+                'f1_micro': val_metrics['f1_micro']
+            }
+        }
+
+        # Determine save directory based on save_type
+        if save_type == 'latest':
+            metrics_dir = os.path.join(self.metrics_dir, 'latest')
+        elif save_type == 'best':
+            metrics_dir = os.path.join(self.metrics_dir, 'best')
+        elif save_type == 'checkpoint':
+            metrics_dir = os.path.join(
+                self.metrics_dir, 'checkpoints', f'epoch_{epoch + 1}')
+        elif save_type == 'final':
+            metrics_dir = os.path.join(self.metrics_dir, 'final')
+
+        # Ensure directory exists using class method
+        self._ensure_dir_exists(metrics_dir)
+
+        # Create full path for metrics file
+        metrics_path = os.path.join(metrics_dir, 'metrics.json')
+
+        # Save metrics
+        with open(metrics_path, 'w') as f:
+            json.dump(metrics_data, f, indent=4)
+
+        print(f"📊 Saved {save_type} metrics at epoch {epoch + 1}")

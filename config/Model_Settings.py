@@ -30,10 +30,36 @@ class ModelSettings:
     dropout_rate: float = 0.1
     num_layers: int = 2
     bidirectional: bool = True
+
+    # Fine-tuning settings with better defaults for BERT
     fine_tune_embedding: bool = False
-    fine_tune_mode: Literal['full', 'last_n',
-                            'gradual'] = 'full'  # We'll use 'full' for now
-    fine_tune_lr: float = 2e-5  # Separate learning rate for BERT fine-tuning
+    fine_tune_mode: Literal['none', 'full',
+                            'last_n', 'gradual', 'selective'] = 'gradual'
+    fine_tune_lr: float = 5e-5  # Standard BERT fine-tuning learning rate
+
+    # Mode-specific parameters
+    # For 'last_n' mode - BERT has 12 layers
+    # Freeze first 8 layers, fine-tune last 4
+    num_frozen_layers: Optional[int] = 8
+
+    # For 'gradual' mode
+    gradual_unfreeze_epochs: Optional[int] = 100  # Unfreeze every 100 epochs
+    gradual_lr_multiplier: float = 0.95  # Slightly reduced from 0.9
+
+    # For 'selective' mode - targeting specific BERT components
+    selective_layers: Optional[List[int]] = field(
+        default_factory=lambda: [9, 10, 11]  # Default layers to fine-tune
+    )
+    # Will be set in post_init
+    layer_lr_multipliers: Optional[Dict[int, float]] = None
+
+    # Advanced fine-tuning options
+    use_discriminative_lr: bool = True  # Enable by default for BERT
+    lr_decay_factor: float = 0.95  # Gradual learning rate decay
+    warmup_steps: int = 1000  # More warmup steps for BERT
+    gradient_scale: float = 2.0  # Increased from 1.0 to help with vanishing gradients
+    max_grad_norm: float = 1.0  # Keep standard clipping
+
     activation: Literal['relu', 'gelu', 'tanh', 'sigmoid'] = 'relu'
     final_activation: Literal['softmax', 'sigmoid', 'linear'] = 'softmax'
     loss: Literal['cross_entropy',              # Standard cross-entropy
@@ -124,6 +150,21 @@ class ModelSettings:
         # Validate attention settings
         self._validate_attention_settings()
 
+        # Validate fine-tuning settings
+        if self.fine_tune_embedding:
+            self._validate_fine_tune_settings()
+
+        # Dynamically set layer_lr_multipliers based on selective_layers
+        if self.fine_tune_mode == 'selective' and self.selective_layers:
+            if self.layer_lr_multipliers is None:
+                # Create multipliers with gradually decreasing values
+                num_layers = len(self.selective_layers)
+                self.layer_lr_multipliers = {
+                    # Decrease by 5% for each earlier layer
+                    layer: 1.0 - (0.05 * i)
+                    for i, layer in enumerate(sorted(self.selective_layers, reverse=True))
+                }
+
     def _get_model_name(self) -> str:
         """Convert embedding type to huggingface model name"""
         model_names = {
@@ -207,6 +248,55 @@ class ModelSettings:
         # If there are any errors, raise them all at once
         if errors:
             raise ValueError("\n".join(errors))
+
+    def _validate_fine_tune_settings(self):
+        """Validate fine-tuning settings based on selected mode"""
+        if self.fine_tune_mode == 'none':
+            if self.fine_tune_embedding:
+                raise ValueError(
+                    "fine_tune_mode 'none' is incompatible with fine_tune_embedding=True")
+
+        elif self.fine_tune_mode == 'last_n':
+            if self.num_frozen_layers is None:
+                raise ValueError(
+                    "num_frozen_layers must be specified for 'last_n' mode")
+            if self.num_frozen_layers < 0:
+                raise ValueError("num_frozen_layers must be non-negative")
+
+        elif self.fine_tune_mode == 'gradual':
+            if self.gradual_unfreeze_epochs is None:
+                raise ValueError(
+                    "gradual_unfreeze_epochs must be specified for 'gradual' mode")
+            if self.gradual_unfreeze_epochs <= 0:
+                raise ValueError("gradual_unfreeze_epochs must be positive")
+            if not 0 < self.gradual_lr_multiplier <= 1:
+                raise ValueError(
+                    "gradual_lr_multiplier must be between 0 and 1")
+
+        elif self.fine_tune_mode == 'selective':
+            if self.selective_layers is None:
+                raise ValueError(
+                    "selective_layers must be specified for 'selective' mode")
+            if not all(isinstance(layer, int) and layer >= 0 for layer in self.selective_layers):
+                raise ValueError(
+                    "selective_layers must be non-negative integers")
+
+            # Validate layer_lr_multipliers matches selective_layers
+            if self.layer_lr_multipliers:
+                if set(self.layer_lr_multipliers.keys()) != set(self.selective_layers):
+                    raise ValueError(
+                        "layer_lr_multipliers keys must match selective_layers exactly")
+                if not all(0 < mult <= 1 for mult in self.layer_lr_multipliers.values()):
+                    raise ValueError(
+                        "All learning rate multipliers must be between 0 and 1")
+
+        # Validate common parameters
+        if self.fine_tune_lr <= 0:
+            raise ValueError("fine_tune_lr must be positive")
+        if self.gradient_scale <= 0:
+            raise ValueError("gradient_scale must be positive")
+        if self.max_grad_norm <= 0:
+            raise ValueError("max_grad_norm must be positive")
 
     def get_activation(self) -> nn.Module:
         """Return the appropriate activation function"""
@@ -331,6 +421,46 @@ class ModelSettings:
             'temperature': self.attention_temperature
         }
 
+    def get_fine_tuning_config(self) -> Dict:
+        """Get fine-tuning configuration based on selected mode"""
+        if not self.fine_tune_embedding:
+            return {'enabled': False}
+
+        config = {
+            'enabled': True,
+            'mode': self.fine_tune_mode,
+            'base_lr': self.fine_tune_lr,
+            'gradient_scale': self.gradient_scale,
+            'max_grad_norm': self.max_grad_norm,
+            'warmup_steps': self.warmup_steps
+        }
+
+        # Add mode-specific configurations
+        if self.fine_tune_mode == 'last_n':
+            config.update({
+                'num_frozen_layers': self.num_frozen_layers
+            })
+
+        elif self.fine_tune_mode == 'gradual':
+            config.update({
+                'unfreeze_epochs': self.gradual_unfreeze_epochs,
+                'lr_multiplier': self.gradual_lr_multiplier
+            })
+
+        elif self.fine_tune_mode == 'selective':
+            config.update({
+                'selective_layers': self.selective_layers,
+                'layer_lr_multipliers': self.layer_lr_multipliers
+            })
+
+        if self.use_discriminative_lr:
+            config.update({
+                'discriminative_lr': True,
+                'lr_decay_factor': self.lr_decay_factor
+            })
+
+        return config
+
     @classmethod
     def get_default(cls):
         return cls(
@@ -342,7 +472,7 @@ class ModelSettings:
             num_layers=2,
             bidirectional=True,
             fine_tune_embedding=False,
-            fine_tune_mode='full',
+            fine_tune_mode='none',
             fine_tune_lr=2e-5,
             activation='relu',
             final_activation='softmax',
@@ -369,3 +499,85 @@ class ModelSettings:
             use_res_net=False,
             res_dropout=0.1
         )
+
+    @classmethod
+    def get_default_fine_tuning(cls) -> 'ModelSettings':
+        """Get optimized default fine-tuning settings for BERT"""
+        return cls(
+            fine_tune_embedding=True,
+            fine_tune_mode='gradual',  # Gradual unfreezing works well with BERT
+            fine_tune_lr=2e-5,
+
+            # Gradual unfreezing settings
+            gradual_unfreeze_epochs=2,
+            gradual_lr_multiplier=0.95,
+
+            # Layer-specific settings
+            num_frozen_layers=8,  # Start with last 4 layers unfrozen
+            selective_layers=[9, 10, 11],  # Focus on last 3 layers
+            layer_lr_multipliers={
+                11: 1.0,
+                10: 0.95,
+                9: 0.9,
+            },
+
+            # Advanced settings
+            use_discriminative_lr=True,
+            lr_decay_factor=0.95,
+            warmup_steps=1000,
+            gradient_scale=2.0,
+            max_grad_norm=1.0,
+
+            # Additional settings for stability
+            use_layer_norm=True,
+            layer_norm_eps=1e-5,
+            use_attention=True,
+            attention_dropout=0.1,
+            dropout_rate=0.1
+        )
+
+    def to_dict(self) -> dict:
+        """Convert ModelSettings to a dictionary"""
+        return {
+            'output_dim': self.output_dim,
+            'embedding_dim': self.embedding_dim,
+            'embedding_type': self.embedding_type,
+            'init_hidden_dim': self.init_hidden_dim,
+            'custom_hidden_dims': self.custom_hidden_dims,
+            'hidden_dims': self.hidden_dims,
+            'dropout_rate': self.dropout_rate,
+            'num_layers': self.num_layers,
+            'bidirectional': self.bidirectional,
+            'fine_tune_embedding': self.fine_tune_embedding,
+            'fine_tune_mode': self.fine_tune_mode,
+            'fine_tune_lr': self.fine_tune_lr,
+            'activation': self.activation,
+            'final_activation': self.final_activation,
+            'loss': self.loss,
+            'pooling': self.pooling,
+            'weight_init': self.weight_init,
+            'init_gain': self.init_gain,
+            'init_mean': self.init_mean,
+            'init_std': self.init_std,
+            'init_a': self.init_a,
+            'init_b': self.init_b,
+            'focal_alpha': self.focal_alpha,
+            'focal_gamma': self.focal_gamma,
+            'label_smoothing': self.label_smoothing,
+            'class_weights': self.class_weights,
+            # Attention settings
+            'use_attention': self.use_attention,
+            'attention_type': self.attention_type,
+            'attention_dim': self.attention_dim,
+            'num_attention_heads': self.num_attention_heads,
+            'attention_dropout': self.attention_dropout,
+            'attention_temperature': self.attention_temperature,
+            # Residual network settings
+            'use_res_net': self.use_res_net,
+            'res_dropout': self.res_dropout,
+            # Layer normalization settings
+            'use_layer_norm': self.use_layer_norm,
+            'layer_norm_eps': self.layer_norm_eps,
+            'layer_norm_elementwise': self.layer_norm_elementwise,
+            'layer_norm_affine': self.layer_norm_affine
+        }
