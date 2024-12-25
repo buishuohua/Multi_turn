@@ -20,6 +20,7 @@ from tqdm import tqdm
 import re
 import numpy as np
 import pandas as pd
+import time
 
 if TYPE_CHECKING:
     from config.Experiment_Config import ExperimentConfig
@@ -302,7 +303,11 @@ class Trainer:
     def _ensure_dir_exists(self, path):
         """Ensure directory exists, create if it doesn't"""
         if not os.path.exists(path):
-            os.makedirs(path, exist_ok=True)
+            os.makedirs(path, exist_ok=True, mode=0o777)
+        elif not os.access(path, os.W_OK):
+            # Try to add write permission
+            current_mode = os.stat(path).st_mode
+            os.chmod(path, current_mode | 0o777)
 
     def _create_epoch_directories(self, epoch):
         """Create epoch-specific directories for checkpoints, figures, and metrics"""
@@ -407,6 +412,65 @@ class Trainer:
             print(
                 f"📁 Saved fine-tuned embedding checkpoint at epoch {epoch + 1}")
 
+    def _save_figure_safely(self, save_path, fig=None, **save_kwargs):
+        """Safely save a matplotlib figure with error handling and cleanup
+        Args:
+            save_path (str): Path where to save the figure
+            fig (matplotlib.figure.Figure, optional): Figure to save. If None, uses current figure
+            **save_kwargs: Additional arguments for plt.savefig
+        """
+        if fig is None:
+            fig = plt.gcf()
+
+        try:
+            # Ensure parent directory exists
+            dir_path = os.path.dirname(save_path)
+            self._ensure_dir_exists(dir_path)
+
+            # Close any existing figures with the same name
+            plt.close(save_path)
+
+            # If file exists, try to remove it
+            if os.path.exists(save_path):
+                try:
+                    os.remove(save_path)
+                except (PermissionError, OSError):
+                    # If can't remove, create alternative filename with timestamp
+                    base, ext = os.path.splitext(save_path)
+                    save_path = f"{base}_{int(time.time())}{ext}"
+
+            # Default save parameters
+            save_params = {
+                'bbox_inches': 'tight',
+                'dpi': 300,
+                'facecolor': 'white',
+                'pad_inches': 0.1
+            }
+            save_params.update(save_kwargs)
+
+            # Save the figure
+            fig.savefig(save_path, **save_params)
+            return True, save_path
+
+        except Exception as e:
+            print(f"❌ Error saving figure to {save_path}")
+            print(f"Error details: {str(e)}")
+
+            # Try saving to fallback location
+            try:
+                fallback_dir = os.path.join(os.getcwd(), 'fallback_results')
+                os.makedirs(fallback_dir, exist_ok=True)
+                fallback_path = os.path.join(
+                    fallback_dir, os.path.basename(save_path))
+                fig.savefig(fallback_path, **save_params)
+                print(f"✓ Saved backup to: {fallback_path}")
+                return True, fallback_path
+            except Exception as backup_error:
+                print(f"❌ Backup save also failed: {str(backup_error)}")
+                return False, None
+        finally:
+            plt.close(fig)
+
     def plot_confusion_matrix(self, y_true, y_pred, save_dir, prefix=''):
         """Plot confusion matrix"""
         # Compute confusion matrix
@@ -483,25 +547,13 @@ class Trainer:
         plt.tight_layout(pad=1.1)
 
         # Create full save path
-        filename = f'{prefix}_confusion_matrix_{self.experiment_name}.png'
+        filename = f'{prefix}_conf.png'
         save_path = os.path.join(save_dir, filename)
 
-        try:
-            # Use class method to ensure directory exists
-            self._ensure_dir_exists(os.path.dirname(save_path))
-
-            # Save figure
-            plt.savefig(save_path,
-                        bbox_inches='tight',
-                        dpi=300,
-                        facecolor='white')
-        except Exception as e:
-            print(f"❌ Error saving confusion matrix")
-            print(f"Attempted path: {save_path}")
-            print(f"Error details: {str(e)}")
-            raise
-        finally:
-            plt.close()
+        success, path = self._save_figure_safely(save_path)
+        if not success:
+            raise RuntimeError(
+                f"Failed to save confusion matrix to {save_path}")
 
     def plot_metrics(self, save_dir):
         """Plot training and validation metrics"""
@@ -778,23 +830,13 @@ class Trainer:
         plt.subplots_adjust(top=0.85, bottom=0.1, left=0.15, right=0.95)
 
         # Create full save path
-        filename = f'{prefix}_class_performance_{self.experiment_name}.png'
+        filename = f'{prefix}_perf.png'
         save_path = os.path.join(save_dir, filename)
 
-        try:
-            # Ensure parent directory exists
-            self._ensure_dir_exists(save_path)
-
-            # Save figure
-            plt.savefig(save_path, bbox_inches='tight',
-                        dpi=300, facecolor='white')
-        except Exception as e:
-            print(f"❌ Error saving class performance plot")
-            print(f"Attempted path: {save_path}")
-            print(f"Error details: {str(e)}")
-            raise
-        finally:
-            plt.close()
+        success, path = self._save_figure_safely(save_path)
+        if not success:
+            raise RuntimeError(
+                f"Failed to save class performance plot to {save_path}")
 
     def _print_metrics(self, phase, metrics, epoch, batch_idx=None):
         """Print metrics in a clean, organized format with vertical alignment"""
@@ -1385,16 +1427,14 @@ class Trainer:
             wspace=0.20    # Vertical space between subplots
         )
 
-        # Save figure
-        save_path = os.path.join(
-            self.figures_dir, f'metrics_whole_period_{self.experiment_name}.png')
-        plt.savefig(save_path,
-                    dpi=300,
-                    bbox_inches='tight',
-                    facecolor='white',
-                    edgecolor='none',
-                    pad_inches=0.1)
-        plt.close()
+        # Create shorter filename
+        filename = 'whole_period_metrics.png'
+        save_path = os.path.join(self.figures_dir, filename)
+
+        success, path = self._save_figure_safely(save_path)
+        if not success:
+            raise RuntimeError(
+                f"Failed to save whole period metrics to {save_path}")
 
     def _check_early_stopping(self, val_loss):
         """Check if training should be stopped based on validation loss"""
