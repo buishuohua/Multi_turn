@@ -36,7 +36,7 @@ class ModelSettings:
     fine_tune_mode: Literal['none', 'full',
                             'last_n', 'gradual', 'selective'] = 'gradual'
     fine_tune_lr: float = 5e-5  # Standard BERT fine-tuning learning rate
-
+    fine_tune_reload_freq: int = 20  # Reload best model every 10 epochs
     # Mode-specific parameters
     # For 'last_n' mode - BERT has 12 layers
     # Freeze first 8 layers, fine-tune last 4
@@ -251,6 +251,10 @@ class ModelSettings:
 
     def _validate_fine_tune_settings(self):
         """Validate fine-tuning settings based on selected mode"""
+        # Add validation for fine_tune_reload_freq
+        if self.fine_tune_reload_freq < 0:
+            raise ValueError("fine_tune_reload_freq must be non-negative")
+
         if self.fine_tune_mode == 'none':
             if self.fine_tune_embedding:
                 raise ValueError(
@@ -432,7 +436,8 @@ class ModelSettings:
             'base_lr': self.fine_tune_lr,
             'gradient_scale': self.gradient_scale,
             'max_grad_norm': self.max_grad_norm,
-            'warmup_steps': self.warmup_steps
+            'warmup_steps': self.warmup_steps,
+            'reload_freq': self.fine_tune_reload_freq  # Add reload frequency
         }
 
         # Add mode-specific configurations
@@ -461,7 +466,7 @@ class ModelSettings:
 
         return config
 
-    @classmethod
+    @ classmethod
     def get_default(cls):
         return cls(
             output_dim=None,  # Will be set automatically by Trainer
@@ -497,7 +502,8 @@ class ModelSettings:
             attention_temperature=1.0,
             # Default residual network settings
             use_res_net=False,
-            res_dropout=0.1
+            res_dropout=0.1,
+            fine_tune_reload_freq=20
         )
 
     @classmethod
@@ -507,6 +513,7 @@ class ModelSettings:
             fine_tune_embedding=True,
             fine_tune_mode='gradual',  # Gradual unfreezing works well with BERT
             fine_tune_lr=2e-5,
+            fine_tune_reload_freq=20,  # Add default reload frequency
 
             # Gradual unfreezing settings
             gradual_unfreeze_epochs=2,
@@ -551,6 +558,7 @@ class ModelSettings:
             'fine_tune_embedding': self.fine_tune_embedding,
             'fine_tune_mode': self.fine_tune_mode,
             'fine_tune_lr': self.fine_tune_lr,
+            'fine_tune_reload_freq': self.fine_tune_reload_freq,
             'activation': self.activation,
             'final_activation': self.final_activation,
             'loss': self.loss,

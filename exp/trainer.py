@@ -84,23 +84,48 @@ class Trainer:
         # Initialize tracking variables
         self._initialize_tracking_variables()
 
-        # Initialize training components
+        # Initialize training components with separate learning rates
         self.criterion = self.config.model_settings.get_loss()
 
-        # Convert model parameters to list before passing to optimizer
-        model_params = list(self.model.parameters())
-        self.optimizer = self.config.training_settings.get_optimizer(
-            model_params)
+        # Separate parameters into embedding and non-embedding groups
+        if config.model_settings.fine_tune_embedding:
+            # Parameters for fine-tuning embedding
+            embedding_params = []
+            # Parameters for the rest of the model
+            other_params = []
 
-        self.scheduler = self.config.training_settings.get_scheduler(
-            self.optimizer)
+            for name, param in self.model.named_parameters():
+                if 'embedding_model' in name:
+                    if param.requires_grad:  # Only include if requires gradient
+                        # Check if parameter has custom learning rate scale
+                        lr_scale = getattr(param, 'lr_scale', 1.0)
+                        embedding_params.append({
+                            'params': param,
+                            'lr': config.model_settings.fine_tune_lr * lr_scale
+                        })
+                else:
+                    other_params.append({
+                        'params': param,
+                        'lr': config.training_settings.learning_rate
+                    })
+
+            # Combine both parameter groups
+            all_params = embedding_params + other_params
+        else:
+            # If not fine-tuning, use single learning rate for all parameters
+            all_params = self.model.parameters()
+
+        # Initialize optimizer with parameter groups
+        self.optimizer = self.config.training_settings.get_optimizer(all_params)
+
+        # Initialize scheduler
+        self.scheduler = self.config.training_settings.get_scheduler(self.optimizer)
 
         # Initialize best validation loss
         self.best_val_loss = float('inf')
 
         # Print detailed experiment information
         self._print_experiment_info()
-
 
     def _set_output_dimension(self):
         """Automatically set the output dimension based on number of classes"""
@@ -280,16 +305,16 @@ class Trainer:
             'metrics_history': self.metrics_history
         }
 
-        # Save based on type (best/latest/checkpoint)
+        # Always save latest
+        latest_path = os.path.join(self.model_dir, 'latest', 'model_latest.pt')
+        torch.save(checkpoint, latest_path)
+        print(f"💾 Saved latest model at epoch {epoch + 1}")
+
+        # Save best if needed
         if is_best:
-            save_path = os.path.join(self.model_dir, 'best', 'model_best.pt')
-            torch.save(checkpoint, save_path)
+            best_path = os.path.join(self.model_dir, 'best', 'model_best.pt')
+            torch.save(checkpoint, best_path)
             print(f"🏆 Saved best model at epoch {epoch + 1}")
-        else:
-            save_path = os.path.join(
-                self.model_dir, 'latest', 'model_latest.pt')
-            torch.save(checkpoint, save_path)
-            print(f"📝 Saved latest model at epoch {epoch + 1}")
 
         # Save periodic checkpoint if needed
         if (epoch + 1) % self.config.training_settings.checkpoint_freq == 0:
@@ -299,62 +324,7 @@ class Trainer:
                 f'checkpoint_epoch_{epoch + 1}.pt'
             )
             torch.save(checkpoint, checkpoint_path)
-            print(f"💾 Saved checkpoint at epoch {epoch + 1}")
-
-        # Save fine-tuned embedding if enabled
-        if self.config.model_settings.fine_tune_embedding:
-            self.model.save_and_reload_latest_model(epoch, is_best)
-
-    def _save_fine_tuned_embedding(self, epoch, is_best=False):
-        """Save fine-tuned embedding model with epoch information"""
-        embedding_state = {
-            'epoch': epoch + 1,
-            'state_dict': self.model.embedding_model.state_dict(),
-            'config': self.config.model_settings.to_dict(),
-            'embedding_type': self.config.model_settings.embedding_type,
-            'experiment_name': self.experiment_name
-        }
-
-        # Create base directories
-        task_type = self.config.training_settings.task_type
-        data_type = self.config.data_settings.which
-        embedding_type = self.config.model_settings.embedding_type
-
-        base_dir = os.path.join(
-            self.config.training_settings.fine_tuned_models_dir,
-            task_type,
-            data_type,
-            embedding_type,
-            self.experiment_name
-        )
-
-        # Create all necessary directories
-        for subdir in ['best', 'latest', 'checkpoints']:
-            dir_path = os.path.join(base_dir, subdir)
-            self._ensure_dir_exists(dir_path)
-
-        # Save based on type (best/latest/checkpoint)
-        if is_best:
-            save_path = os.path.join(
-                base_dir, 'best', 'embedding_model_best.pt')
-            torch.save(embedding_state, save_path)
-            print(f"🏆 Saved best fine-tuned embedding at epoch {epoch + 1}")
-        else:
-            save_path = os.path.join(
-                base_dir, 'latest', 'embedding_model_latest.pt')
-            torch.save(embedding_state, save_path)
-            print(f"💾 Saved latest fine-tuned embedding at epoch {epoch + 1}")
-
-        # Save periodic checkpoint
-        if (epoch + 1) % self.config.training_settings.checkpoint_freq == 0:
-            checkpoint_path = os.path.join(
-                base_dir,
-                'checkpoints',
-                f'embedding_model_epoch_{epoch + 1}.pt'
-            )
-            torch.save(embedding_state, checkpoint_path)
-            print(
-                f"📁 Saved fine-tuned embedding checkpoint at epoch {epoch + 1}")
+            print(f"📁 Saved checkpoint model at epoch {epoch + 1}")
 
     def _save_figure_safely(self, save_path, fig=None, **save_kwargs):
         """Safely save a matplotlib figure with error handling and cleanup
@@ -400,18 +370,6 @@ class Trainer:
             print(f"❌ Error saving figure to {save_path}")
             print(f"Error details: {str(e)}")
 
-            # Try saving to fallback location
-            try:
-                fallback_dir = os.path.join(os.getcwd(), 'fallback_results')
-                os.makedirs(fallback_dir, exist_ok=True)
-                fallback_path = os.path.join(
-                    fallback_dir, os.path.basename(save_path))
-                fig.savefig(fallback_path, **save_params)
-                print(f"✓ Saved backup to: {fallback_path}")
-                return True, fallback_path
-            except Exception as backup_error:
-                print(f"❌ Backup save also failed: {str(backup_error)}")
-                return False, None
         finally:
             plt.close(fig)
 
@@ -663,10 +621,12 @@ class Trainer:
         else:
             self.start_epoch = 0
 
+
         # 2. Main training loop
         for epoch in range(self.start_epoch, self.config.training_settings.num_epochs):
             # Update current epoch in model before training
-            self.model.update_epoch(epoch)
+            if not (self.continue_training and epoch == self.start_epoch):
+                self.model.update_epoch(epoch)
 
             print(f"\n{'─'*50}")
             print(
@@ -687,11 +647,22 @@ class Trainer:
             latest_dir = os.path.join(self.figures_dir, 'latest')
             self._ensure_dir_exists(latest_dir)
             self._save_epoch_figures(
-                train_labels, train_preds, val_labels, val_preds, latest_dir)
+                train_labels, train_preds, None, None, latest_dir, phase='train')
+            self._save_epoch_figures(
+                None, None, val_labels, val_preds, latest_dir, phase='val')
             self._save_metrics_data(
                 epoch, train_metrics, val_metrics, save_type='latest')
-            self._save_latest_checkpoint(epoch, val_metrics)
 
+            current_val_loss = val_metrics['loss']
+            is_best = current_val_loss < self.best_val_loss
+
+            # Add this: Save latest fine-tuned embedding if enabled
+            if self.config.model_settings.fine_tune_embedding:
+                self._save_fine_tuned_embedding(
+                    epoch, is_best=False)  # This will save as latest
+
+            self.save_checkpoint(epoch, val_metrics['loss'], is_best=is_best)
+            
             # Save periodic checkpoints
             if (epoch + 1) % self.config.training_settings.checkpoint_freq == 0:
                 # Save checkpoint figures
@@ -699,8 +670,9 @@ class Trainer:
                     self.figures_dir, 'checkpoints', f'epoch_{epoch + 1}')
                 self._ensure_dir_exists(checkpoint_figures_dir)
                 self._save_epoch_figures(
-                    train_labels, train_preds, val_labels, val_preds, checkpoint_figures_dir)
-
+                    train_labels, train_preds, None, None, checkpoint_figures_dir, phase='train')
+                self._save_epoch_figures(
+                    None, None, val_labels, val_preds, checkpoint_figures_dir, phase='val')
                 # Save checkpoint metrics
                 self._save_metrics_data(
                     epoch, train_metrics, val_metrics, save_type='checkpoint')
@@ -708,28 +680,8 @@ class Trainer:
                 # Save model checkpoint
                 checkpoint_dir = os.path.join(self.model_dir, 'checkpoints')
                 self._ensure_dir_exists(checkpoint_dir)
-                checkpoint_path = os.path.join(
-                    checkpoint_dir, f'checkpoint_epoch_{epoch + 1}.pt')
-                self.save_checkpoint(epoch, val_metrics['loss'], is_best=False)
-
-                # Save fine-tuned embedding checkpoint if enabled
-                if self.config.model_settings.fine_tune_embedding:
-                    checkpoint_embedding_dir = os.path.join(
-                        self.config.training_settings.fine_tuned_models_dir,
-                        self.config.training_settings.task_type.lower(),
-                        self.config.data_settings.which,
-                        self.config.model_settings.embedding_type,
-                        self.experiment_name,
-                        'checkpoints'
-                    )
-                    self._ensure_dir_exists(checkpoint_embedding_dir)
-                    checkpoint_embedding_path = os.path.join(
-                        checkpoint_embedding_dir, f'checkpoint_epoch_{epoch + 1}.pt')
-                    self._save_fine_tuned_embedding(epoch, is_best=False)
 
             # Check if this is the best model
-            current_val_loss = val_metrics['loss']
-            is_best = current_val_loss < self.best_val_loss
 
             if is_best:
                 self.best_val_loss = current_val_loss
@@ -739,14 +691,13 @@ class Trainer:
                 best_dir = os.path.join(self.figures_dir, 'best')
                 self._ensure_dir_exists(best_dir)
                 self._save_epoch_figures(
-                    train_labels, train_preds, val_labels, val_preds, best_dir)
+                    train_labels, train_preds, None, None, best_dir, phase='train')
+                self._save_epoch_figures(
+                    None, None, val_labels, val_preds, best_dir, phase='val')
 
                 # Save best metrics
                 self._save_metrics_data(
                     epoch, train_metrics, val_metrics, save_type='best')
-
-                # Save best model
-                self.save_checkpoint(epoch, val_metrics['loss'], is_best=True)
 
                 # Save best fine-tuned embedding if enabled
                 if self.config.model_settings.fine_tune_embedding:
@@ -876,31 +827,25 @@ class Trainer:
         # Calculate and print metrics only at epoch end
         self._print_metrics('train', metrics, len(self.metrics_history))
 
-        # Save latest state after each epoch
-        latest_figures_dir = os.path.join(self.figures_dir, 'latest')
-        self._ensure_dir_exists(latest_figures_dir)
-        self._save_epoch_figures(
-            train_labels, train_preds, None, None, latest_figures_dir)
-
-        # Save checkpoint state if at checkpoint frequency
-        if (len(self.metrics_history) + 1) % self.config.training_settings.checkpoint_freq == 0:
-            checkpoint_figures_dir = os.path.join(
-                self.figures_dir, 'checkpoints', f'epoch_{len(self.metrics_history) + 1}')
-            self._ensure_dir_exists(checkpoint_figures_dir)
-            self._save_epoch_figures(
-                train_labels, train_preds, None, None, checkpoint_figures_dir)
-
-        if self.model.config.model_settings.fine_tune_embedding:
-            self.model.save_and_reload_latest_model(
-                len(self.metrics_history), is_best=False)
-
         return metrics, train_preds, train_labels
 
     def evaluate(self, loader, phase='val'):
         """Validate or test the model"""
         self.model.eval()
 
-        # Handle fine-tuned model loading based on phase
+        # Handle model loading based on phase
+        if phase == 'test':
+            # For testing, load the best model checkpoint
+            best_model_path = os.path.join(
+                self.model_dir, 'best', 'model_best.pt')
+            if os.path.exists(best_model_path):
+                checkpoint = torch.load(best_model_path, weights_only=True)
+                self.model.load_state_dict(checkpoint['model_state_dict'])
+                print(f"✅ Loaded best model for testing")
+            else:
+                print(f"⚠️ No best model found for testing")
+
+        # Handle fine-tuned embedding loading based on phase
         if self.config.model_settings.fine_tune_embedding:
             if phase == 'val':
                 # For validation, use latest fine-tuned model
@@ -928,7 +873,10 @@ class Trainer:
                 model_version = 'best'
 
             if os.path.exists(embedding_path):
-                self._load_fine_tuned_embedding(embedding_path)
+                embedding_checkpoint = torch.load(
+                    embedding_path, weights_only=True)
+                self.model.embedding_model.load_state_dict(
+                    embedding_checkpoint['state_dict'])
                 print(
                     f"✅ Loaded {model_version} fine-tuned embedding for {phase} evaluation")
             else:
@@ -1158,50 +1106,63 @@ class Trainer:
             print(f"✅ Using latest model from epoch {latest_epoch + 1}")
             return latest_checkpoint_path
         elif max_checkpoint_epoch >= 0:
-            print(f"✅ Using checkpoint from epoch {max_checkpoint_epoch + 1}")
+            print(
+                f"✅ Using checkpoint from epoch {max_checkpoint_epoch + 1}")
             return max_checkpoint_path
 
         print("⚠️ No valid checkpoints found, starting fresh training")
         return None
 
-    def _save_epoch_figures(self, train_labels, train_preds, val_labels, val_preds, save_dir):
+    def _save_epoch_figures(self, train_labels, train_preds, val_labels, val_preds, save_dir, phase=None):
         """Save figures for current epoch in the appropriate directory"""
-        current_epoch = len(
-            self.metrics_history)  # This will match the current epoch number
+        current_epoch = len(self.metrics_history)  # Current epoch number
 
-        # 1. Save training phase figures if available
-        if train_labels is not None and train_preds is not None:
-            # Save confusion matrix for training
+        # Create a unique key for this save operation
+        dir_type = save_dir.split(os.sep)[-1]
+        save_key = f"{dir_type}_{current_epoch}"
+
+        # Define icons for different directory types
+        icons = {
+            'latest': '💾',    # Floppy disk for latest
+            'best': '🏆',      # Trophy for best
+            'checkpoints': '📁'  # Folder for checkpoints
+        }
+        # Default icon if directory type not found
+        icon = icons.get(dir_type, '📊')
+
+        if phase == 'train' and train_labels is not None and train_preds is not None:
             self.plot_confusion_matrix(
                 train_labels, train_preds,
                 save_dir=save_dir,
                 prefix='train'
             )
-
-            # Save per-class performance for training
             self.plot_class_performance(
                 train_labels, train_preds,
                 save_dir=save_dir,
                 prefix='train'
             )
-            print(f"📊 Saved training plots for epoch {self.start_epoch + 1}")
+            # Only print message if not a checkpoint save
+            if not hasattr(self, f'_last_train_plot_{save_key}') and 'epoch_' not in dir_type:
+                print(
+                    f"{icon} Saved {dir_type} training plots for epoch {current_epoch}")
+                setattr(self, f'_last_train_plot_{save_key}', True)
 
-        # 2. Save validation phase figures if available
-        if val_labels is not None and val_preds is not None:
-            # Save confusion matrix for validation
+        elif phase == 'val' and val_labels is not None and val_preds is not None:
             self.plot_confusion_matrix(
                 val_labels, val_preds,
                 save_dir=save_dir,
                 prefix='val'
             )
-
-            # Save per-class performance for validation
             self.plot_class_performance(
                 val_labels, val_preds,
                 save_dir=save_dir,
                 prefix='val'
             )
-            print(f"📊 Saved validation plots for epoch {self.start_epoch + 1}")
+            # Only print message if not a checkpoint save
+            if not hasattr(self, f'_last_val_plot_{save_key}') and 'epoch_' not in dir_type:
+                print(
+                    f"{icon} Saved {dir_type} validation plots for epoch {current_epoch}")
+                setattr(self, f'_last_val_plot_{save_key}', True)
 
     def save_whole_period_metrics(self):
         """Create and save a metrics plot for the entire training period so far"""
@@ -1240,87 +1201,90 @@ class Trainer:
             (('recall_macro', 'recall_micro'), 'Recall (Macro vs Micro)'),
             (('f1_macro', 'f1_micro'), 'F1 (Macro vs Micro)')
         ]
-        if not hasattr(self, 'metrics_history') or not self.metrics_history:
-            print("⚠️ No metrics history available to plot")
-            return
+        try:
+            for i, (metric, title) in enumerate(metric_pairs, 1):
+                ax = fig.add_subplot(2, 2, i)
+                ax.set_facecolor('white')
 
-        for i, (metric, title) in enumerate(metric_pairs, 1):
-            ax = fig.add_subplot(2, 2, i)
-            ax.set_facecolor('white')
+                # Get epochs for x-axis
+                epochs = list(range(1, len(self.metrics_history) + 1))
 
-            # Get epochs for x-axis
-            epochs = list(range(1, len(self.metrics_history) + 1))
+                if isinstance(metric, tuple):
+                    # Plot macro metrics
+                    train_macro = [m.get('train', {}).get(metric[0], 0)
+                                   for m in self.metrics_history]
+                    val_macro = [m.get('val', {}).get(metric[0], 0)
+                                 for m in self.metrics_history]
+                    ax.plot(epochs, train_macro, '-', color='#1f77b4',
+                            label='Train (Macro)', marker='o', markersize=2)
+                    ax.plot(epochs, val_macro, '-', color='#7cc7ff',
+                            label='Val (Macro)', marker='o', markersize=2)
 
-            if isinstance(metric, tuple):
-                # Plot macro metrics
-                train_macro = [m.get('train', {}).get(metric[0], 0)
-                               for m in self.metrics_history]
-                val_macro = [m.get('val', {}).get(metric[0], 0)
-                             for m in self.metrics_history]
-                ax.plot(epochs, train_macro, '-', color='#1f77b4',
-                        label='Train (Macro)', marker='o', markersize=2)
-                ax.plot(epochs, val_macro, '-', color='#7cc7ff',
-                        label='Val (Macro)', marker='o', markersize=2)
+                    # Plot micro metrics
+                    train_micro = [m.get('train', {}).get(metric[1], 0)
+                                   for m in self.metrics_history]
+                    val_micro = [m.get('val', {}).get(metric[1], 0)
+                                 for m in self.metrics_history]
+                    ax.plot(epochs, train_micro, '-', color='#d62728',
+                            label='Train (Micro)', marker='s', markersize=2)
+                    ax.plot(epochs, val_micro, '-', color='#ff9999',
+                            label='Val (Micro)', marker='s', markersize=2)
+                else:
+                    train_metric = [m.get('train', {}).get(metric, 0)
+                                    for m in self.metrics_history]
+                    val_metric = [m.get('val', {}).get(metric, 0)
+                                  for m in self.metrics_history]
+                    ax.plot(epochs, train_metric, '-', color='#1f77b4',
+                            label='Train', marker='o', markersize=2)
+                    ax.plot(epochs, val_metric, '-', color='#7cc7ff',
+                            label='Val', marker='o', markersize=2)
 
-                # Plot micro metrics
-                train_micro = [m.get('train', {}).get(metric[1], 0)
-                               for m in self.metrics_history]
-                val_micro = [m.get('val', {}).get(metric[1], 0)
-                             for m in self.metrics_history]
-                ax.plot(epochs, train_micro, '-', color='#d62728',
-                        label='Train (Micro)', marker='s', markersize=2)
-                ax.plot(epochs, val_micro, '-', color='#ff9999',
-                        label='Val (Micro)', marker='s', markersize=2)
-            else:
-                train_metric = [m.get('train', {}).get(metric, 0)
-                                for m in self.metrics_history]
-                val_metric = [m.get('val', {}).get(metric, 0)
-                              for m in self.metrics_history]
-                ax.plot(epochs, train_metric, '-', color='#1f77b4',
-                        label='Train', marker='o', markersize=2)
-                ax.plot(epochs, val_metric, '-', color='#7cc7ff',
-                        label='Val', marker='o', markersize=2)
+                # Set integer ticks on x-axis
+                ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
 
-            # Set integer ticks on x-axis
-            ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+                # Customize axis and labels
+                ax.set_xlabel('Epoch', fontsize=11, color='black', labelpad=8)
+                ax.set_ylabel('Score', fontsize=11, color='black', labelpad=8)
+                ax.set_title(title, pad=10, fontsize=12,
+                             fontweight='bold', color='black')
+                ax.set_ylim(0.0, 1.0)
 
-            # Customize axis and labels
-            ax.set_xlabel('Epoch', fontsize=11, color='black', labelpad=8)
-            ax.set_ylabel('Score', fontsize=11, color='black', labelpad=8)
-            ax.set_title(title, pad=10, fontsize=12,
-                         fontweight='bold', color='black')
-            ax.set_ylim(0.0, 1.0)
+                # Adjust legend position and parameters
+                legend = ax.legend(
+                    facecolor='white',
+                    edgecolor='none',
+                    loc='upper left',
+                    bbox_to_anchor=(0.02, 0.98),
+                    framealpha=0.9,
+                    ncol=1
+                )
+                plt.setp(legend.get_texts(), color='black')
 
-            # Adjust legend position and parameters
-            legend = ax.legend(
-                facecolor='white',
-                edgecolor='none',
-                loc='upper left',
-                bbox_to_anchor=(0.02, 0.98),
-                framealpha=0.9,
-                ncol=1
+            # Adjust subplot spacing to ensure legends are visible
+            plt.tight_layout()
+            plt.subplots_adjust(
+                top=0.85,      # Keep space for main title
+                bottom=0.08,   # Space at bottom
+                left=0.08,     # Space at left
+                right=0.98,    # Space at right
+                hspace=0.25,   # Horizontal space between subplots
+                wspace=0.20    # Vertical space between subplots
             )
-            plt.setp(legend.get_texts(), color='black')
 
-        # Adjust subplot spacing to ensure legends are visible
-        plt.tight_layout()
-        plt.subplots_adjust(
-            top=0.85,      # Keep space for main title
-            bottom=0.08,   # Space at bottom
-            left=0.08,     # Space at left
-            right=0.98,    # Space at right
-            hspace=0.25,   # Horizontal space between subplots
-            wspace=0.20    # Vertical space between subplots
-        )
+            # Create shorter filename
+            filename = 'whole_period_metrics.png'
+            save_path = os.path.join(self.figures_dir, filename)
 
-        # Create shorter filename
-        filename = 'whole_period_metrics.png'
-        save_path = os.path.join(self.figures_dir, filename)
-
-        success, path = self._save_figure_safely(save_path)
-        if not success:
-            raise RuntimeError(
-                f"Failed to save whole period metrics to {save_path}")
+            success, path = self._save_figure_safely(save_path)
+            if not success:
+                raise RuntimeError(
+                    f"Failed to save whole period metrics to {save_path}")
+        except Exception as e:
+            print(
+                f"⚠️ Error while creating whole period metrics plot: {str(e)}")
+            raise
+        finally:
+            plt.close(fig)
 
     def _check_early_stopping(self, val_loss):
         """Check if training should be stopped based on validation loss"""
@@ -1349,34 +1313,59 @@ class Trainer:
         if not self.config.model_settings.fine_tune_embedding:
             return
 
-        save_dir = os.path.join(
+        # Base directory for fine-tuned models
+        base_dir = os.path.join(
             self.config.training_settings.fine_tuned_models_dir,
             self.config.training_settings.task_type,
             self.config.data_settings.which,
             self.config.model_settings.embedding_type,
-            self.experiment_name,
-            'best' if is_best else 'latest'
+            self.experiment_name
         )
 
-        os.makedirs(save_dir, exist_ok=True)
-        file_name = 'embedding_model_best.pt' if is_best else 'embedding_model_latest.pt'
-        save_path = os.path.join(save_dir, file_name)
+        # Determine save directory and filename based on save type
+        if is_best:
+            save_dir = os.path.join(base_dir, 'best')
+            file_name = 'embedding_model_best.pt'
+            save_type = 'best'
+        elif (epoch + 1) % self.config.training_settings.checkpoint_freq == 0:
+            save_dir = os.path.join(base_dir, 'checkpoints')
+            file_name = f'embedding_model_epoch_{epoch + 1}.pt'
+            save_type = 'checkpoint'
+        else:
+            save_dir = os.path.join(base_dir, 'latest')
+            file_name = 'embedding_model_latest.pt'
+            save_type = 'latest'
 
-        state_dict = {
-            'epoch': epoch,
-            'state_dict': self.model.embedding_model.state_dict(),
-            'fine_tune_config': {
-                'mode': self.config.model_settings.fine_tune_mode,
-                'unfrozen_layers': [name for name, param in self.model.embedding_model.named_parameters()
-                                    if param.requires_grad],
-                'lr_scales': {name: getattr(param, 'lr_scale', 1.0)
-                              for name, param in self.model.embedding_model.named_parameters()}
+        # Create save key to track unique saves
+        save_key = f"{save_type}_{epoch + 1}"
+
+        # Only save if we haven't saved this type for this epoch
+        if not hasattr(self, f'_last_embedding_save_{save_key}'):
+            self._ensure_dir_exists(save_dir)
+            save_path = os.path.join(save_dir, file_name)
+
+            state_dict = {
+                'epoch': epoch + 1,
+                'state_dict': self.model.embedding_model.state_dict(),
+                'fine_tune_config': {
+                    'mode': self.config.model_settings.fine_tune_mode,
+                    'unfrozen_layers': [name for name, param in self.model.embedding_model.named_parameters()
+                                        if param.requires_grad],
+                    'lr_scales': {name: getattr(param, 'lr_scale', 1.0)
+                                  for name, param in self.model.embedding_model.named_parameters()}
+                }
             }
-        }
 
-        torch.save(state_dict, save_path)
-        print(
-            f"💾 Saved {'best' if is_best else 'latest'} fine-tuned embedding at epoch {self.start_epoch + 1}")
+            torch.save(state_dict, save_path)
+
+            # Print save message with appropriate icon
+            icon = '🏆' if is_best else (
+                '📁' if save_type == 'checkpoint' else '💾')
+            print(
+                f"{icon} Saved {save_type} fine-tuned embedding at epoch {epoch + 1}")
+
+            # Mark this save as completed
+            setattr(self, f'_last_embedding_save_{save_key}', True)
 
     def _monitor_training_dynamics(self, epoch: int, batch_idx: int, loss: float, outputs: torch.Tensor, activations: dict):
         """Monitor training dynamics including gradients, activations, and loss patterns"""
@@ -1568,6 +1557,16 @@ class Trainer:
             val_metrics: Dictionary containing validation metrics
             save_type: 'latest', 'best', 'checkpoint', or 'final'
         """
+        # Define icons for different save types
+        icons = {
+            'latest': '💾',     # Floppy disk for latest
+            'best': '🏆',       # Trophy for best
+            'checkpoint': '📁',  # Folder for checkpoints
+            'final': '🔚'       # End arrow for final
+        }
+        # Default icon if save type not found
+        icon = icons.get(save_type, '📊')
+
         # Prepare simplified metrics data
         metrics_data = {
             'epoch': epoch + 1,
@@ -1626,47 +1625,4 @@ class Trainer:
         with open(metrics_path, 'w') as f:
             json.dump(metrics_data, f, indent=4)
 
-        print(f"💾 Saved {save_type} metrics at epoch {epoch + 1}")
-
-    def _save_latest_checkpoint(self, epoch, val_metrics):
-        """Save the latest model checkpoint"""
-        # Ensure latest directory exists
-        latest_dir = os.path.join(self.model_dir, 'latest')
-        self._ensure_dir_exists(latest_dir)
-
-        # Save model checkpoint
-        checkpoint = {
-            'epoch': epoch,
-            'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
-            'val_loss': val_metrics['loss'],
-            'train_losses': self.train_losses,
-            'val_losses': self.val_losses,
-            'metrics_history': self.metrics_history
-        }
-
-        latest_model_path = os.path.join(latest_dir, 'model_latest.pt')
-        torch.save(checkpoint, latest_model_path)
-
-        # Save fine-tuned embedding if enabled
-        if self.config.model_settings.fine_tune_embedding:
-            latest_embedding_dir = os.path.join(
-                self.config.training_settings.fine_tuned_models_dir,
-                self.config.training_settings.task_type.lower(),
-                self.config.data_settings.which,
-                self.config.model_settings.embedding_type,
-                self.experiment_name,
-                'latest'
-            )
-            self._ensure_dir_exists(latest_embedding_dir)
-
-            embedding_state = {
-                'epoch': epoch + 1,
-                'state_dict': self.model.embedding_model.state_dict(),
-                'config': self.config.model_settings.to_dict()
-            }
-
-            latest_embedding_path = os.path.join(
-                latest_embedding_dir, 'embedding_model_latest.pt')
-            torch.save(embedding_state, latest_embedding_path)
+        print(f"{icon} Saved {save_type} metrics at epoch {epoch + 1}")

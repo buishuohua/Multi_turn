@@ -77,9 +77,19 @@ class BaseLSTM(nn.Module, ABC):
         self._configure_fine_tuning(embedding_model)
 
         if self.config.training_settings.continue_training:
-            # For continuing training
-            if self.current_epoch == 0:  # First epoch when continuing
-                # Load the best model for initialization
+            # Determine if we should load best model
+            load_best = False
+            if self.current_epoch == 0:  # Initial load when continuing training
+                load_best = True
+            elif (self.config.model_settings.fine_tune_reload_freq > 0 and
+                  self.current_epoch % self.config.model_settings.fine_tune_reload_freq == 0):
+                # Reload best model based on frequency
+                load_best = True
+                print(
+                    f"📌 Fine-tune reload frequency reached at epoch {self.current_epoch}")
+
+            if load_best:
+                # Load best model
                 best_path = os.path.join(
                     self.config.training_settings.fine_tuned_models_dir,
                     self.config.training_settings.task_type,
@@ -92,9 +102,11 @@ class BaseLSTM(nn.Module, ABC):
                 if os.path.exists(best_path):
                     checkpoint = torch.load(best_path, weights_only=True)
                     embedding_model.load_state_dict(checkpoint['state_dict'])
-                    print("✅ Loaded best fine-tuned embedding model for initialization")
-            else:  # Second epoch and after
-                # Load from latest (which is the modified best version)
+                    print("✅ Loaded best fine-tuned embedding model")
+                else:
+                    print("⚠️ No best model found, using original weights")
+            else:
+                # Load latest model
                 latest_path = os.path.join(
                     self.config.training_settings.fine_tuned_models_dir,
                     self.config.training_settings.task_type,
@@ -108,7 +120,9 @@ class BaseLSTM(nn.Module, ABC):
                     checkpoint = torch.load(latest_path, weights_only=True)
                     embedding_model.load_state_dict(checkpoint['state_dict'])
                     print(
-                        "✅ Loaded latest fine-tuned embedding for continuing training")
+                        f"✅ Loaded latest fine-tuned embedding from epoch {self.current_epoch}")
+                else:
+                    print("⚠️ No latest model found, using original weights")
 
         return embedding_model
 
@@ -431,53 +445,8 @@ class BaseLSTM(nn.Module, ABC):
         print(f"📊 Currently unfrozen layers: {sorted(total_unfrozen)}")
 
     def save_and_reload_latest_model(self, epoch: int, is_best: bool = False):
-        """Save current embedding model state and reload it"""
-        if not self.config.model_settings.fine_tune_embedding:
-            return
-
-        # Prepare directories
-        task_type = self.config.training_settings.task_type
-        data_type = self.config.data_settings.which
-
-        fine_tuned_dir = os.path.join(
-            self.config.training_settings.fine_tuned_models_dir,
-            task_type,
-            data_type,
-            self.config.model_settings.embedding_type,
-            self.experiment_name
-        )
-
-        # Prepare state dict with all necessary information
-        state_dict = {
-            'epoch': epoch,
-            'state_dict': self.embedding_model.state_dict(),
-            'fine_tune_config': {
-                'mode': self.config.model_settings.fine_tune_mode,
-                'unfrozen_layers': [name for name, param in self.embedding_model.named_parameters()
-                                    if param.requires_grad],
-                'lr_scales': {name: getattr(param, 'lr_scale', 1.0)
-                              for name, param in self.embedding_model.named_parameters()}
-            }
-        }
-
-        # Save latest version
-        latest_dir = os.path.join(fine_tuned_dir, 'latest')
-        os.makedirs(latest_dir, exist_ok=True)
-        latest_path = os.path.join(latest_dir, 'embedding_model_latest.pt')
-        torch.save(state_dict, latest_path)
-        print(f"💾 Saved latest fine-tuned embedding at epoch {epoch + 1}")
-        print(f"📍 Save path: {latest_path}")
-
-        # Save best version if indicated
-        if is_best:
-            best_dir = os.path.join(fine_tuned_dir, 'best')
-            os.makedirs(best_dir, exist_ok=True)
-            best_path = os.path.join(best_dir, 'embedding_model_best.pt')
-            torch.save(state_dict, best_path)
-            print(f"🏆 Saved best fine-tuned embedding at epoch {epoch + 1}")
-            print(f"📍 Save path: {best_path}")
-
-        # Note: We don't reload the model here anymore since the trainer handles that
+        """Save and reload latest model"""
+        pass
 
     def update_epoch(self, epoch: int):
         """Update the current epoch number"""
