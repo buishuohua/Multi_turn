@@ -1,0 +1,22 @@
+{
+    "train_metrics": {
+        "loss": 2.6960850268837033,
+        "accuracy": 0.9857283464566929,
+        "precision_macro": 0.98601255076225,
+        "precision_micro": 0.9857283464566929,
+        "recall_macro": 0.9855429605370591,
+        "recall_micro": 0.9857283464566929,
+        "f1_macro": 0.9854236769271619,
+        "f1_micro": 0.9857283464566929
+    },
+    "val_metrics": {
+        "loss": 2.827522850036621,
+        "accuracy": 0.85625,
+        "precision_macro": 0.7575111893610343,
+        "precision_micro": 0.85625,
+        "recall_macro": 0.7354494748457596,
+        "recall_micro": 0.85625,
+        "f1_macro": 0.7287674280655017,
+        "f1_micro": 0.85625
+    }
+}

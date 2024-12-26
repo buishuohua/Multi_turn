@@ -21,6 +21,7 @@ import re
 import numpy as np
 import pandas as pd
 import time
+from utils.experiment_utils import create_experiment_name
 
 if TYPE_CHECKING:
     from config.Experiment_Config import ExperimentConfig
@@ -62,32 +63,26 @@ class Trainer:
     def __init__(self, config: ExperimentConfig):
         self.config = config
 
-        # Load data automatically
+        # Load data and set output dimension
         self.train_loader, self.val_loader, self.test_loader, self.label_encoder = loader(
             config)
-
-        # Automatically set output dimension based on number of classes
         self._set_output_dimension()
 
-        # Initialize model with correct output dimension
+        # Initialize model
         self.model = self.config.model_selection.get_model(config)
-        self.model = self.model.to(self.config.training_settings.device)
+        self.model = self.model.to(config.training_settings.device)
 
-        self.experiment_name = self._create_experiment_name()
+        # Create full experiment name
+        self.experiment_name = create_experiment_name(config, is_model=False)
+
+        # Update model's experiment name to match trainer's
+        self.model.experiment_name = self.experiment_name
 
         # Create directories
         self._setup_directories()
 
         # Initialize tracking variables
         self._initialize_tracking_variables()
-
-        # Create fine-tuned models directory if needed
-        if config.model_settings.fine_tune_embedding:
-            self.fine_tuned_dir = os.path.join(
-                config.training_settings.fine_tuned_models_dir,
-                config.model_settings.embedding_type
-            )
-            self._setup_fine_tuned_directories()
 
         # Initialize training components
         self.criterion = self.config.model_settings.get_loss()
@@ -105,6 +100,7 @@ class Trainer:
 
         # Print detailed experiment information
         self._print_experiment_info()
+
 
     def _set_output_dimension(self):
         """Automatically set the output dimension based on number of classes"""
@@ -124,173 +120,84 @@ class Trainer:
         self.continue_training = self.config.training_settings.continue_training
 
     def _setup_directories(self):
-        """Set up necessary directories for saving results"""
-        def normalize_path(*paths):
-            """Normalize path for cross-platform compatibility"""
-            return os.path.normpath(os.path.join(*paths))
+        """Setup all necessary directories for saving results"""
+        # Get task type and data type
+        task_type = self.config.training_settings.task_type
+        data_type = self.config.data_settings.which  # 'question' or 'response'
 
-        # Store normalize function for use in other methods
-        self._normalize_path = normalize_path
-
-        # Set up main directories
-        self.model_dir = normalize_path(
+        # Base directories with task type and data type
+        self.model_dir = os.path.join(
             self.config.training_settings.save_model_dir,
+            task_type,
+            data_type,
             self.experiment_name
         )
-        self.results_dir = normalize_path(
+        self.results_dir = os.path.join(
             self.config.training_settings.save_results_dir,
+            task_type,
+            data_type,
             self.experiment_name
         )
 
-        # Define all required directories
-        self.figures_dir = normalize_path(self.results_dir, 'figures')
-        self.metrics_dir = normalize_path(self.results_dir, 'metrics')
-
-        # Create base directories
-        for directory in [self.model_dir, self.results_dir, self.figures_dir, self.metrics_dir]:
-            os.makedirs(directory, exist_ok=True)
-
-        # Create subdirectories
-        special_dirs = ['latest', 'best', 'final', 'checkpoints']
-        for special_dir in special_dirs:
-            os.makedirs(normalize_path(
-                self.model_dir, special_dir), exist_ok=True)
-            os.makedirs(normalize_path(
-                self.figures_dir, special_dir), exist_ok=True)
-            os.makedirs(normalize_path(
-                self.metrics_dir, special_dir), exist_ok=True)
-
-        print(f"✅ Created all necessary directories")
-
-    def _create_experiment_name(self):
-        """Create concise but informative experiment name"""
-        components = []
-
-        # 1. Task Type Prefix
-        task_prefix = 'ID' if self.config.training_settings.task_type == 'identification' else 'CLS'
-        components.append(task_prefix)
-
-        # 2. Model Architecture (including bidirectional and resnet)
-        model_prefix = []
-        if self.config.model_settings.use_res_net:
-            model_prefix.append('Res')
-        model_prefix.append(self.config.model_selection.model_type)
-        components.append(''.join(model_prefix))
-
-        # 3. Embedding Info
-        emb_name = self.config.model_settings.embedding_type.split('_')[0]
-        components.append(emb_name)
-
-        # 4. Core Model Parameters
-        components.append(f"L{self.config.model_settings.num_layers}")
-        components.append(f"H{self.config.model_settings.init_hidden_dim}")
-        components.append(f"M{self.config.tokenizer_settings.max_length}")
-
-        # Add learning rate (with scientific notation for small values)
-        lr = self.config.training_settings.learning_rate
-        if lr < 0.01:
-            lr_str = f"{lr:.0e}".replace('e-0', 'e-')
-        else:
-            lr_str = f"{lr:.3f}".rstrip('0').rstrip('.')
-        components.append(f"LR{lr_str}")
-
-        # Add activation function (first 4 chars)
-        components.append(f"Act{self.config.model_settings.activation[:4]}")
-
-        # 5. Training Strategy
-        components.append(self.config.model_settings.loss.replace('_', ''))
-
-        # 6. Initialization Function
-        init_map = {
-            'xavier_uniform': 'xavier',
-            'xavier_normal': 'xavier',
-            'kaiming_uniform': 'kaiming',
-            'kaiming_normal': 'kaiming',
-            'orthogonal': 'ortho',
-            'zeros': 'zero',
-            'ones': 'one'
-        }
-        init_name = init_map.get(self.config.model_settings.weight_init,
-                                 self.config.model_settings.weight_init[:3])
-        components.append(init_name)
-
-        # 7. Fine-tuning Strategy
+        # Setup fine-tuned models directory if needed
         if self.config.model_settings.fine_tune_embedding:
-            ft_components = []
-            # Add fine-tuning mode
-            mode_map = {
-                'none': 'N',
-                'full': 'F',
-                'last_n': f'L{self.config.model_settings.num_frozen_layers}',
-                'selective': 'S',
-                'gradual': 'G'
-            }
-            ft_mode = mode_map.get(
-                self.config.model_settings.fine_tune_mode, 'X')
-            ft_components.append(f"FT{ft_mode}")
+            self._setup_fine_tuned_directories()  # Replace the old code with this call
 
-            # Add discriminative learning rate info if used
-            if self.config.model_settings.use_discriminative_lr:
-                ft_components.append(
-                    f"D{self.config.model_settings.lr_decay_factor:.1f}")
+        # Create subdirectories for models
+        for subdir in ['latest', 'best', 'checkpoints']:
+            self._ensure_dir_exists(os.path.join(self.model_dir, subdir))
 
-            # Add fine-tuning learning rate if different from base
-            if hasattr(self.config.model_settings, 'fine_tune_lr'):
-                ft_lr = self.config.model_settings.fine_tune_lr
-                if ft_lr < 0.01:
-                    ft_lr_str = f"{ft_lr:.0e}".replace('e-0', 'e-')
-                else:
-                    ft_lr_str = f"{ft_lr:.3f}".rstrip('0').rstrip('.')
-                ft_components.append(f"LR{ft_lr_str}")
+        # Create subdirectories for results
+        self.metrics_dir = os.path.join(self.results_dir, 'metrics')
+        self.figures_dir = os.path.join(self.results_dir, 'figures')
+        for dir_path in [self.metrics_dir, self.figures_dir]:
+            for subdir in ['latest', 'best', 'checkpoints']:
+                self._ensure_dir_exists(os.path.join(dir_path, subdir))
 
-            components.append('_'.join(ft_components))
-
-        # 8. Data Strategy (if any)
-        if self.config.data_settings.imbalanced_strategy != 'none':
-            imbal_map = {
-                'weighted_sampler': 'ws',
-                'class_weights': 'cw',
-                'random_oversample': 'ros',
-                'random_undersample': 'rus',
-                'smote': 'sm',
-                'adasyn': 'ada',
-                'tomek': 'tmk'
-            }
-            imbal_code = imbal_map.get(self.config.data_settings.imbalanced_strategy,
-                                       self.config.data_settings.imbalanced_strategy[:3])
-            components.append(imbal_code)
-
-        # 9. Special Features (as flags)
-        flags = []
-        if self.config.model_settings.use_attention:
-            flags.append('A')  # Attention
-        if self.config.model_settings.use_layer_norm:
-            flags.append('LN')  # Layer Normalization
-        if flags:
-            components.append(''.join(flags))
-
-        return '_'.join(components)
-
-    def load_checkpoint(self, checkpoint_path):
-        """Load checkpoint and return checkpoint data"""
-        if not checkpoint_path:
-            print("⚠️ No checkpoint path provided")
-            return None
-
+    def load_checkpoint(self, checkpoint_path=None):
+        """Load checkpoint from the specified path or auto-detect latest checkpoint"""
         try:
+            task_type = self.config.training_settings.task_type
+            data_type = self.config.data_settings.which
+
+            # 1. First determine which checkpoint to load
+            if checkpoint_path is None:
+                checkpoint_path = self._get_latest_checkpoint_path(
+                    task_type, data_type)
+                if checkpoint_path is None:
+                    return None
+
             print(f"📂 Loading checkpoint from: {checkpoint_path}")
-            checkpoint = torch.load(checkpoint_path)
+            checkpoint = torch.load(checkpoint_path, weights_only=True)
 
-            # Load model and optimizer states
+            # 2. Load model state
             self.model.load_state_dict(checkpoint['model_state_dict'])
-            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
 
-            # Load training history
+            # 3. Load optimizer state
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+            # 4. Load scheduler state if it exists and scheduler is configured
+            if self.scheduler is not None and 'scheduler_state_dict' in checkpoint:
+                self.scheduler.load_state_dict(
+                    checkpoint['scheduler_state_dict'])
+
+            # 5. Load training history directly
             self.train_losses = checkpoint.get('train_losses', [])
             self.val_losses = checkpoint.get('val_losses', [])
             self.metrics_history = checkpoint.get('metrics_history', [])
             self.best_val_loss = checkpoint.get('val_loss', float('inf'))
+
+            # 6. Load corresponding embedding state if fine-tuning is enabled
+            if self.config.model_settings.fine_tune_embedding:
+                embedding_path = self._get_corresponding_embedding_path(
+                    checkpoint_path)
+                if embedding_path and os.path.exists(embedding_path):
+                    embedding_checkpoint = torch.load(
+                        embedding_path, weights_only=True)
+                    self.model.embedding_model.load_state_dict(
+                        embedding_checkpoint['state_dict'])
+                    print(
+                        f"✅ Successfully loaded corresponding fine-tuned embedding from: {embedding_path}")
 
             print(
                 f"✅ Successfully loaded checkpoint from epoch {checkpoint['epoch'] + 1}")
@@ -299,6 +206,34 @@ class Trainer:
         except Exception as e:
             print(f"❌ Error loading checkpoint: {str(e)}")
             return None
+
+    def _get_latest_checkpoint_path(self, task_type, data_type):
+        """Helper to determine the most recent checkpoint path"""
+        base_dir = os.path.join(
+            self.config.training_settings.save_model_dir,
+            task_type,
+            data_type,
+            self.experiment_name
+        )
+
+        # Check paths in order: best -> latest -> most recent checkpoint
+        paths = [
+            os.path.join(base_dir, 'best', 'model_best.pt'),
+            os.path.join(base_dir, 'latest', 'model_latest.pt')
+        ]
+
+        for path in paths:
+            if os.path.exists(path):
+                return path
+
+        return None
+
+    def _get_corresponding_embedding_path(self, checkpoint_path):
+        """Get the corresponding embedding path based on checkpoint path"""
+        if 'best' in checkpoint_path:
+            return os.path.join(self.fine_tuned_dir, 'best', 'embedding_model_best.pt')
+        else:
+            return os.path.join(self.fine_tuned_dir, 'latest', 'embedding_model_latest.pt')
 
     def _ensure_dir_exists(self, path):
         """Ensure directory exists, create if it doesn't"""
@@ -345,67 +280,76 @@ class Trainer:
             'metrics_history': self.metrics_history
         }
 
-        # Save model checkpoint
+        # Save based on type (best/latest/checkpoint)
         if is_best:
-            best_dir = os.path.join(self.model_dir, 'best')
-            self._ensure_dir_exists(best_dir)
-            best_path = os.path.join(best_dir, 'model_best.pt')
-            torch.save(checkpoint, best_path)
+            save_path = os.path.join(self.model_dir, 'best', 'model_best.pt')
+            torch.save(checkpoint, save_path)
             print(f"🏆 Saved best model at epoch {epoch + 1}")
         else:
-            latest_dir = os.path.join(self.model_dir, 'latest')
-            self._ensure_dir_exists(latest_dir)
-            latest_path = os.path.join(latest_dir, 'model_latest.pt')
-            torch.save(checkpoint, latest_path)
+            save_path = os.path.join(
+                self.model_dir, 'latest', 'model_latest.pt')
+            torch.save(checkpoint, save_path)
             print(f"📝 Saved latest model at epoch {epoch + 1}")
 
-        # Save periodic checkpoint if configured
+        # Save periodic checkpoint if needed
         if (epoch + 1) % self.config.training_settings.checkpoint_freq == 0:
-            checkpoint_dir = os.path.join(self.model_dir, 'checkpoints')
-            self._ensure_dir_exists(checkpoint_dir)
             checkpoint_path = os.path.join(
-                checkpoint_dir,
+                self.model_dir,
+                'checkpoints',
                 f'checkpoint_epoch_{epoch + 1}.pt'
             )
             torch.save(checkpoint, checkpoint_path)
             print(f"💾 Saved checkpoint at epoch {epoch + 1}")
 
-        # Save fine-tuned embedding model if enabled
+        # Save fine-tuned embedding if enabled
         if self.config.model_settings.fine_tune_embedding:
-            self._save_fine_tuned_embedding(epoch, is_best)
+            self.model.save_and_reload_latest_model(epoch, is_best)
 
     def _save_fine_tuned_embedding(self, epoch, is_best=False):
         """Save fine-tuned embedding model with epoch information"""
-        # Prepare embedding state
         embedding_state = {
             'epoch': epoch + 1,
             'state_dict': self.model.embedding_model.state_dict(),
             'config': self.config.model_settings.to_dict(),
             'embedding_type': self.config.model_settings.embedding_type,
-            'experiment_name': self.experiment_name  # Add experiment name to state
+            'experiment_name': self.experiment_name
         }
 
-        # 1. Save latest version
-        latest_dir = os.path.join(self.experiment_fine_tuned_dir, 'latest')
-        latest_path = os.path.join(latest_dir, 'embedding_model_latest.pt')
-        torch.save(embedding_state, latest_path)
-        print(
-            f"💾 Saved latest fine-tuned embedding model at epoch {epoch + 1}")
+        # Create base directories
+        task_type = self.config.training_settings.task_type
+        data_type = self.config.data_settings.which
+        embedding_type = self.config.model_settings.embedding_type
 
-        # 2. Save best version if applicable
+        base_dir = os.path.join(
+            self.config.training_settings.fine_tuned_models_dir,
+            task_type,
+            data_type,
+            embedding_type,
+            self.experiment_name
+        )
+
+        # Create all necessary directories
+        for subdir in ['best', 'latest', 'checkpoints']:
+            dir_path = os.path.join(base_dir, subdir)
+            self._ensure_dir_exists(dir_path)
+
+        # Save based on type (best/latest/checkpoint)
         if is_best:
-            best_dir = os.path.join(self.experiment_fine_tuned_dir, 'best')
-            best_path = os.path.join(best_dir, 'embedding_model_best.pt')
-            torch.save(embedding_state, best_path)
-            print(
-                f"🏆 Saved best fine-tuned embedding model at epoch {epoch + 1}")
+            save_path = os.path.join(
+                base_dir, 'best', 'embedding_model_best.pt')
+            torch.save(embedding_state, save_path)
+            print(f"🏆 Saved best fine-tuned embedding at epoch {epoch + 1}")
+        else:
+            save_path = os.path.join(
+                base_dir, 'latest', 'embedding_model_latest.pt')
+            torch.save(embedding_state, save_path)
+            print(f"💾 Saved latest fine-tuned embedding at epoch {epoch + 1}")
 
-        # 3. Save periodic checkpoint based on frequency
+        # Save periodic checkpoint
         if (epoch + 1) % self.config.training_settings.checkpoint_freq == 0:
-            checkpoint_dir = os.path.join(
-                self.experiment_fine_tuned_dir, 'checkpoints')
             checkpoint_path = os.path.join(
-                checkpoint_dir,
+                base_dir,
+                'checkpoints',
                 f'embedding_model_epoch_{epoch + 1}.pt'
             )
             torch.save(embedding_state, checkpoint_path)
@@ -554,184 +498,6 @@ class Trainer:
         if not success:
             raise RuntimeError(
                 f"Failed to save confusion matrix to {save_path}")
-
-    def plot_metrics(self, save_dir):
-        """Plot training and validation metrics"""
-        # Use a default style and customize it
-        plt.style.use('default')
-        plt.rcParams.update({
-            'font.family': 'serif',
-            'font.size': 10,
-            'axes.labelsize': 12,
-            'axes.titlesize': 12,
-            'xtick.labelsize': 10,
-            'ytick.labelsize': 10,
-            'legend.fontsize': 10,
-            'axes.linewidth': 1.0,
-            'axes.grid': True,
-            'grid.alpha': 0.3,
-            'grid.linestyle': '--',
-            'axes.axisbelow': True,
-            'axes.facecolor': 'white',
-            'figure.facecolor': 'white',
-            'grid.color': 'gray',
-            'grid.linewidth': 0.5,
-            'lines.linewidth': 1.5,
-            'lines.markersize': 2,
-            'xtick.direction': 'out',
-            'ytick.direction': 'out',
-            'xtick.major.width': 1.0,
-            'ytick.major.width': 1.0,
-            'xtick.minor.width': 0.5,
-            'ytick.minor.width': 0.5,
-            'axes.spines.top': True,
-            'axes.spines.right': True,
-            'axes.spines.left': True,
-            'axes.spines.bottom': True,
-        })
-
-        # Create figure with higher DPI
-        fig = plt.figure(figsize=(16, 12), dpi=300, facecolor='white')
-
-        # Determine the correct title type based on the save directory
-        if 'latest' in save_dir:
-            title_type = 'Latest'
-        elif 'best' in save_dir:
-            title_type = 'Best'
-        elif 'final' in save_dir:
-            title_type = 'Final'
-        elif 'checkpoints' in save_dir:
-            title_type = 'Checkpoint'
-        else:
-            title_type = ''
-
-        # Title formatting
-        current_epoch = len(self.metrics_history)
-        total_epochs = self.config.training_settings.num_epochs
-        title_lines = [
-            f'Training Metrics ({title_type})',
-            f'{self.experiment_name}',
-            f'Epoch {current_epoch}/{total_epochs}'
-        ]
-
-        # Main title with better spacing
-        fig.suptitle('\n'.join(title_lines),
-                     y=0.95,
-                     fontsize=14,
-                     fontweight='bold',
-                     color='black',
-                     linespacing=1.5)
-
-        metric_pairs = [
-            ('accuracy', 'Accuracy'),
-            (('precision_macro', 'precision_micro'), 'Precision (Macro vs Micro)'),
-            (('recall_macro', 'recall_micro'), 'Recall (Macro vs Micro)'),
-            (('f1_macro', 'f1_micro'), 'F1 (Macro vs Micro)')
-        ]
-
-        for i, (metric, title) in enumerate(metric_pairs, 1):
-            ax = fig.add_subplot(2, 2, i)
-            ax.set_facecolor('white')
-
-            # Plot metrics
-            if isinstance(metric, tuple):
-                for m, (linestyle, marker) in zip(metric, [('-', 'o'), ('--', 's')]):
-                    train_metric = [h[f'train_{m}']
-                                    for h in self.metrics_history]
-                    val_metric = [h[f'val_{m}'] for h in self.metrics_history]
-
-                    if 'macro' in m:
-                        ax.plot(train_metric, linestyle=linestyle, marker=marker,
-                                label='Train (Macro)', color='#1f77b4',
-                                markersize=2, linewidth=1.5, markeredgewidth=1.5)
-                        ax.plot(val_metric, linestyle=linestyle, marker=marker,
-                                label='Val (Macro)', color='#7cc7ff',
-                                markersize=2, linewidth=1.5, markeredgewidth=1.5)
-                    else:
-                        ax.plot(train_metric, linestyle=linestyle, marker=marker,
-                                label='Train (Micro)', color='#d62728',
-                                markersize=2, linewidth=1.5, markeredgewidth=1.5)
-                        ax.plot(val_metric, linestyle=linestyle, marker=marker,
-                                label='Val (Micro)', color='#ff9999',
-                                markersize=2, linewidth=1.5, markeredgewidth=1.5)
-            else:
-                train_metric = [h[f'train_{metric}']
-                                for h in self.metrics_history]
-                val_metric = [h[f'val_{metric}'] for h in self.metrics_history]
-                ax.plot(train_metric, '-o', label='Train', color='#1f77b4',
-                        markersize=2, linewidth=1.5, markeredgewidth=1.5)
-                ax.plot(val_metric, '-o', label='Val', color='#7cc7ff',
-                        markersize=2, linewidth=1.5, markeredgewidth=1.5)
-
-            # Enhanced grid and axis styling
-            ax.grid(True, linestyle='--', alpha=0.3,
-                    color='gray', linewidth=0.5)
-            ax.set_axisbelow(True)
-
-            # Set axis limits and ticks
-            ax.set_ylim(0.0, 1.0)
-            ax.set_xlim(left=0)
-            ax.yaxis.set_major_locator(plt.MultipleLocator(0.1))
-            ax.yaxis.set_minor_locator(plt.MultipleLocator(0.05))
-            ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
-
-            # Title and labels with consistent black color
-            ax.set_title(title, pad=10, fontsize=12,
-                         fontweight='bold', color='black')
-            ax.set_xlabel('Epoch', fontsize=11, color='black', labelpad=8)
-            ax.set_ylabel('Score', fontsize=11, color='black', labelpad=8)
-
-            # Spine and tick styling
-            for spine in ax.spines.values():
-                spine.set_color('black')
-                spine.set_linewidth(1.0)
-            ax.tick_params(which='both', colors='black', width=1.0)
-            ax.tick_params(which='major', length=6)
-            ax.tick_params(which='minor', length=3)
-
-            # Legend styling
-            legend = ax.legend(
-                facecolor='white',
-                edgecolor='none',
-                loc='upper left',
-                bbox_to_anchor=(0.98, 0.98),
-                framealpha=0.9,
-                ncol=1,
-                handlelength=1.5,
-                handletextpad=0.5,
-                columnspacing=1.0,
-                borderaxespad=0.2,
-                markerscale=1.0
-            )
-            plt.setp(legend.get_texts(), color='black')
-            legend.get_frame().set_linewidth(0.5)
-
-        # Adjust subplot spacing
-        plt.subplots_adjust(
-            top=0.88,
-            bottom=0.08,
-            left=0.08,
-            right=0.98,
-            hspace=0.25,
-            wspace=0.20
-        )
-
-        # Before saving, ensure all directories exist
-        base_path = os.path.join(self.results_dir, 'figures')
-        latest_figures_dir = os.path.join(base_path, 'latest')
-        self._ensure_dir_exists(base_path)
-        self._ensure_dir_exists(latest_figures_dir)
-
-        for path in [base_path, latest_figures_dir]:
-            plt.savefig(
-                os.path.join(path, f'metrics_plot_{self.experiment_name}.png'),
-                dpi=300,
-                bbox_inches='tight',
-                facecolor='white',
-                edgecolor='none',
-                pad_inches=0.1
-            )
-        plt.close()
 
     def plot_class_performance(self, y_true, y_pred, save_dir, prefix=''):
         """Plot class performance with path checking"""
@@ -884,6 +650,8 @@ class Trainer:
                 checkpoint = self.load_checkpoint(latest_checkpoint)
                 if checkpoint is not None:
                     self.start_epoch = checkpoint['epoch'] + 1
+                    # Update model's current epoch
+                    self.model.update_epoch(self.start_epoch)
                     print(
                         f"✅ Resuming training from epoch {self.start_epoch + 1}")
                 else:
@@ -897,100 +665,154 @@ class Trainer:
 
         # 2. Main training loop
         for epoch in range(self.start_epoch, self.config.training_settings.num_epochs):
+            # Update current epoch in model before training
+            self.model.update_epoch(epoch)
+
             print(f"\n{'─'*50}")
             print(
                 f"⏳ Epoch {epoch + 1}/{self.config.training_settings.num_epochs}")
             print(f"{'─'*50}")
 
-            # Training and validation phases
+            # Train one epoch
             train_metrics, train_preds, train_labels = self.train_epoch()
-            val_metrics, val_preds, val_labels = self.evaluate(
-                self.val_loader, 'val')
 
-            # Update tracking variables
+            # Evaluate on validation set
+            val_metrics, val_preds, val_labels = self.evaluate(
+                self.val_loader, phase='val')
+
+            # Update metrics history
             self._update_tracking(train_metrics, val_metrics)
 
-            # 3. Save latest state
-            self._save_latest_state(
-                epoch, train_labels, train_preds, val_labels, val_preds)
+            # Save latest figures and metrics
+            latest_dir = os.path.join(self.figures_dir, 'latest')
+            self._ensure_dir_exists(latest_dir)
+            self._save_epoch_figures(
+                train_labels, train_preds, val_labels, val_preds, latest_dir)
             self._save_metrics_data(
                 epoch, train_metrics, val_metrics, save_type='latest')
+            self._save_latest_checkpoint(epoch, val_metrics)
 
-            # 4. Save periodic checkpoints
+            # Save periodic checkpoints
             if (epoch + 1) % self.config.training_settings.checkpoint_freq == 0:
-                self._save_checkpoint_state(
-                    epoch, train_labels, train_preds, val_labels, val_preds)
+                # Save checkpoint figures
+                checkpoint_figures_dir = os.path.join(
+                    self.figures_dir, 'checkpoints', f'epoch_{epoch + 1}')
+                self._ensure_dir_exists(checkpoint_figures_dir)
+                self._save_epoch_figures(
+                    train_labels, train_preds, val_labels, val_preds, checkpoint_figures_dir)
+
+                # Save checkpoint metrics
                 self._save_metrics_data(
                     epoch, train_metrics, val_metrics, save_type='checkpoint')
 
-            # 5. Handle best model saving
-            if val_metrics['loss'] < self.best_val_loss:
-                self._save_best_state(
-                    epoch, train_labels, train_preds, val_labels, val_preds, val_metrics['loss'])
+                # Save model checkpoint
+                checkpoint_dir = os.path.join(self.model_dir, 'checkpoints')
+                self._ensure_dir_exists(checkpoint_dir)
+                checkpoint_path = os.path.join(
+                    checkpoint_dir, f'checkpoint_epoch_{epoch + 1}.pt')
+                self.save_checkpoint(epoch, val_metrics['loss'], is_best=False)
+
+                # Save fine-tuned embedding checkpoint if enabled
+                if self.config.model_settings.fine_tune_embedding:
+                    checkpoint_embedding_dir = os.path.join(
+                        self.config.training_settings.fine_tuned_models_dir,
+                        self.config.training_settings.task_type.lower(),
+                        self.config.data_settings.which,
+                        self.config.model_settings.embedding_type,
+                        self.experiment_name,
+                        'checkpoints'
+                    )
+                    self._ensure_dir_exists(checkpoint_embedding_dir)
+                    checkpoint_embedding_path = os.path.join(
+                        checkpoint_embedding_dir, f'checkpoint_epoch_{epoch + 1}.pt')
+                    self._save_fine_tuned_embedding(epoch, is_best=False)
+
+            # Check if this is the best model
+            current_val_loss = val_metrics['loss']
+            is_best = current_val_loss < self.best_val_loss
+
+            if is_best:
+                self.best_val_loss = current_val_loss
+                self.patience_counter = 0
+
+                # Save best figures
+                best_dir = os.path.join(self.figures_dir, 'best')
+                self._ensure_dir_exists(best_dir)
+                self._save_epoch_figures(
+                    train_labels, train_preds, val_labels, val_preds, best_dir)
+
+                # Save best metrics
                 self._save_metrics_data(
                     epoch, train_metrics, val_metrics, save_type='best')
 
-            # 6. Early stopping check
-            if self._check_early_stopping(val_metrics['loss']):
-                print(f"\n⚠ Early stopping triggered at epoch {epoch + 1}")
+                # Save best model
+                self.save_checkpoint(epoch, val_metrics['loss'], is_best=True)
+
+                # Save best fine-tuned embedding if enabled
+                if self.config.model_settings.fine_tune_embedding:
+                    self._save_fine_tuned_embedding(epoch, is_best=True)
+
+            # Early stopping check
+            if self.patience_counter >= self.config.training_settings.early_stopping_patience:
+                print(f"⚠️ Early stopping triggered after {epoch + 1} epochs")
+                # Save final state before breaking
+                self._save_final_state(
+                    train_labels, train_preds, val_labels, val_preds)
                 break
 
-        # 7. Save final state
-        self._save_final_state(train_labels, train_preds,
-                               val_labels, val_preds)
-        self._save_metrics_data(epoch, train_metrics,
-                                val_metrics, save_type='final')
+            # Learning rate scheduling
+            if self.scheduler is not None:
+                self.scheduler.step(current_val_loss)
+
+            # Save whole period metrics
+            self.save_whole_period_metrics()
+
+        # Save final state at end of training if not stopped early
+        if self.patience_counter < self.config.training_settings.early_stopping_patience:
+            self._save_final_state(
+                train_labels, train_preds, val_labels, val_preds)
 
         return self.metrics_history
 
     def _update_tracking(self, train_metrics, val_metrics):
-        """Update tracking variables with new metrics"""
+        """Update training history with new metrics"""
+        # Add losses to tracking lists
         self.train_losses.append(train_metrics['loss'])
         self.val_losses.append(val_metrics['loss'])
-        epoch_metrics = {f'train_{k}': v for k, v in train_metrics.items()}
-        epoch_metrics.update({f'val_{k}': v for k, v in val_metrics.items()})
-        self.metrics_history.append(epoch_metrics)
 
-    def _save_latest_state(self, epoch, train_labels, train_preds, val_labels, val_preds):
-        """Save latest model state and figures"""
-        latest_dir = os.path.join(self.figures_dir, 'latest')
-        self._ensure_dir_exists(latest_dir)
-        self._save_epoch_figures(
-            train_labels, train_preds, val_labels, val_preds, latest_dir)
-        self.save_checkpoint(epoch, self.val_losses[-1], is_best=False)
+        # Create metrics dictionary with the exact structure needed for plotting
+        metrics = {
+            'epoch': len(self.metrics_history) + 1,
+            'train': {
+                'accuracy': train_metrics['accuracy'],
+                'precision_macro': train_metrics['precision_macro'],
+                'precision_micro': train_metrics['precision_micro'],
+                'recall_macro': train_metrics['recall_macro'],
+                'recall_micro': train_metrics['recall_micro'],
+                'f1_macro': train_metrics['f1_macro'],
+                'f1_micro': train_metrics['f1_micro']
+            },
+            'val': {
+                'accuracy': val_metrics['accuracy'],
+                'precision_macro': val_metrics['precision_macro'],
+                'precision_micro': val_metrics['precision_micro'],
+                'recall_macro': val_metrics['recall_macro'],
+                'recall_micro': val_metrics['recall_micro'],
+                'f1_macro': val_metrics['f1_macro'],
+                'f1_micro': val_metrics['f1_micro']
+            }
+        }
 
-    def _save_checkpoint_state(self, epoch, train_labels, train_preds, val_labels, val_preds):
-        """Save periodic checkpoint state and figures"""
-        # Create checkpoint directory paths
-        checkpoint_figures_dir = os.path.join(
-            self.figures_dir, 'checkpoints', f'epoch_{epoch + 1}')
+        # Add the metrics to history
+        if not hasattr(self, 'metrics_history'):
+            self.metrics_history = []
+        self.metrics_history.append(metrics)
 
-        # Ensure directories exist
-        self._ensure_dir_exists(checkpoint_figures_dir)
-
-        self.save_checkpoint(epoch, self.val_losses[-1], is_best=False)
-
-        # Save figures
-        self._save_epoch_figures(
-            train_labels, train_preds, val_labels, val_preds, checkpoint_figures_dir
-        )
-
-    def _save_best_state(self, epoch, train_labels, train_preds, val_labels, val_preds, val_loss):
-        """Save best model state and figures"""
-        self.best_val_loss = val_loss
-        best_dir = os.path.join(self.figures_dir, 'best')
-        self._ensure_dir_exists(best_dir)
-        self._save_epoch_figures(
-            train_labels, train_preds, val_labels, val_preds, best_dir)
-        self.save_checkpoint(epoch, val_loss, is_best=True)
-        print(f"🏆 New best model achieved at epoch {epoch + 1}!")
-
-    def _save_final_state(self, train_labels, train_preds, val_labels, val_preds):
-        """Save final model state and figures"""
-        final_dir = os.path.join(self.figures_dir, 'final')
-        self._ensure_dir_exists(final_dir)
-        self._save_epoch_figures(
-            train_labels, train_preds, val_labels, val_preds, final_dir)
+        # Update early stopping counter
+        if val_metrics['loss'] >= self.best_val_loss:
+            self.patience_counter += 1
+        else:
+            self.patience_counter = 0
 
     def train_epoch(self):
         """Train for one epoch"""
@@ -1054,14 +876,68 @@ class Trainer:
         # Calculate and print metrics only at epoch end
         self._print_metrics('train', metrics, len(self.metrics_history))
 
+        # Save latest state after each epoch
+        latest_figures_dir = os.path.join(self.figures_dir, 'latest')
+        self._ensure_dir_exists(latest_figures_dir)
+        self._save_epoch_figures(
+            train_labels, train_preds, None, None, latest_figures_dir)
+
+        # Save checkpoint state if at checkpoint frequency
+        if (len(self.metrics_history) + 1) % self.config.training_settings.checkpoint_freq == 0:
+            checkpoint_figures_dir = os.path.join(
+                self.figures_dir, 'checkpoints', f'epoch_{len(self.metrics_history) + 1}')
+            self._ensure_dir_exists(checkpoint_figures_dir)
+            self._save_epoch_figures(
+                train_labels, train_preds, None, None, checkpoint_figures_dir)
+
+        if self.model.config.model_settings.fine_tune_embedding:
+            self.model.save_and_reload_latest_model(
+                len(self.metrics_history), is_best=False)
+
         return metrics, train_preds, train_labels
 
     def evaluate(self, loader, phase='val'):
-        """Validate the model"""
+        """Validate or test the model"""
         self.model.eval()
-        total_loss = 0  # Initialize total_loss here
+
+        # Handle fine-tuned model loading based on phase
+        if self.config.model_settings.fine_tune_embedding:
+            if phase == 'val':
+                # For validation, use latest fine-tuned model
+                embedding_path = os.path.join(
+                    self.config.training_settings.fine_tuned_models_dir,
+                    self.config.training_settings.task_type,
+                    self.config.data_settings.which,
+                    self.config.model_settings.embedding_type,
+                    self.experiment_name,
+                    'latest',
+                    'embedding_model_latest.pt'
+                )
+                model_version = 'latest'
+            else:  # phase == 'test'
+                # For testing, use best fine-tuned model
+                embedding_path = os.path.join(
+                    self.config.training_settings.fine_tuned_models_dir,
+                    self.config.training_settings.task_type,
+                    self.config.data_settings.which,
+                    self.config.model_settings.embedding_type,
+                    self.experiment_name,
+                    'best',
+                    'embedding_model_best.pt'
+                )
+                model_version = 'best'
+
+            if os.path.exists(embedding_path):
+                self._load_fine_tuned_embedding(embedding_path)
+                print(
+                    f"✅ Loaded {model_version} fine-tuned embedding for {phase} evaluation")
+            else:
+                print(
+                    f"⚠️ No {model_version} fine-tuned model found for {phase} evaluation")
+
+        total_loss = 0
         num_samples = 0
-        val_labels, val_preds = [], []
+        all_labels, all_preds = [], []
 
         with torch.no_grad():
             for batch in tqdm(loader, desc=f'Evaluating ({phase})'):
@@ -1081,37 +957,39 @@ class Trainer:
                 num_samples += batch_size
 
                 preds = torch.argmax(outputs, dim=1)
-                val_labels.extend(labels.cpu().numpy())
-                val_preds.extend(preds.cpu().numpy())
+                all_labels.extend(labels.cpu().numpy())
+                all_preds.extend(preds.cpu().numpy())
 
         # Calculate metrics
-        metrics = calculate_metrics(val_labels, val_preds)
+        metrics = calculate_metrics(all_labels, all_preds)
         metrics['loss'] = total_loss / num_samples
 
-        # Calculate and print validation metrics
-        self._print_metrics('val', metrics, len(self.metrics_history))
+        # Calculate and print metrics
+        self._print_metrics(phase, metrics, len(self.metrics_history))
 
-        return metrics, val_labels, val_preds
+        return metrics, all_labels, all_preds
 
     def _setup_fine_tuned_directories(self):
         """Set up directories for fine-tuned embedding models"""
-        # Create main directory for embedding type
-        self._ensure_dir_exists(self.fine_tuned_dir)
+        if not self.config.model_settings.fine_tune_embedding:
+            return
 
-        # Create experiment-specific directory
-        self.experiment_fine_tuned_dir = os.path.join(
-            self.fine_tuned_dir,
+        # Match BaseLSTM's directory structure
+        task_type = self.config.training_settings.task_type
+        data_type = self.config.data_settings.which
+
+        self.fine_tuned_dir = os.path.join(
+            self.config.training_settings.fine_tuned_models_dir,
+            task_type,
+            data_type,
+            self.config.model_settings.embedding_type,
             self.experiment_name
         )
-        self._ensure_dir_exists(self.experiment_fine_tuned_dir)
 
-        # Create subdirectories for checkpoints and latest models
-        self._ensure_dir_exists(os.path.join(
-            self.experiment_fine_tuned_dir, 'checkpoints'))
-        self._ensure_dir_exists(os.path.join(
-            self.experiment_fine_tuned_dir, 'latest'))
-        self._ensure_dir_exists(os.path.join(
-            self.experiment_fine_tuned_dir, 'best'))
+        # Create subdirectories
+        for subdir in ['latest', 'best', 'checkpoints']:
+            dir_path = os.path.join(self.fine_tuned_dir, subdir)
+            self._ensure_dir_exists(dir_path)
 
     def _print_experiment_info(self):
         """Print detailed experiment configuration and setup"""
@@ -1144,7 +1022,8 @@ class Trainer:
             print(f"  • Type: {self.config.model_settings.attention_type}")
             print(
                 f"  • Heads: {self.config.model_settings.num_attention_heads}")
-            print(f"  • Dimension: {self.config.model_settings.attention_dim}")
+            print(
+                f"  • Dimension: {self.config.model_settings.attention_dim}")
             print(
                 f"  • Dropout: {self.config.model_settings.attention_dropout}")
         print(
@@ -1205,7 +1084,7 @@ class Trainer:
             print(f"- CUDA devices: {torch.cuda.device_count()}")
 
         # Dataset information
-        print("\n📚 Dataset Information:")
+        print("\n Dataset Information:")
         print(f"- Training samples: {len(self.train_loader.dataset)}")
         print(f"- Validation samples: {len(self.val_loader.dataset)}")
         print(f"- Test samples: {len(self.test_loader.dataset)}")
@@ -1215,7 +1094,7 @@ class Trainer:
         if self.config.model_settings.fine_tune_embedding:
             print("\n🔄 Fine-tuning Configuration:")
             print(f"- Mode: {self.config.model_settings.fine_tune_mode}")
-            print(f"- Fine-tuned Models Dir: {self.experiment_fine_tuned_dir}")
+            print(f"- Fine-tuned Models Dir: {self.fine_tuned_dir}")
             if self.config.model_settings.use_discriminative_lr:
                 print(
                     f"- Discriminative LR Decay: {self.config.model_settings.lr_decay_factor}")
@@ -1248,8 +1127,9 @@ class Trainer:
 
         if latest_exists and os.path.exists(latest_model_path):
             try:
-                checkpoint = torch.load(latest_model_path)
+                checkpoint = torch.load(latest_model_path, weights_only=True)
                 latest_epoch = checkpoint.get('epoch', -1)
+                latest_checkpoint_path = latest_model_path
                 print(
                     f"📝 Found model in latest folder from epoch {latest_epoch + 1}")
             except Exception as e:
@@ -1273,11 +1153,10 @@ class Trainer:
                 print(
                     f"📁 Found checkpoint from epoch {max_checkpoint_epoch + 1}")
 
-        # Decide which checkpoint to use
-        if latest_epoch > max_checkpoint_epoch:
-            if latest_epoch >= 0:
-                print(f"✅ Using latest model from epoch {latest_epoch + 1}")
-                return latest_model_path
+        # Compare epochs and return the most recent checkpoint
+        if latest_epoch >= max_checkpoint_epoch and latest_epoch >= 0:
+            print(f"✅ Using latest model from epoch {latest_epoch + 1}")
+            return latest_checkpoint_path
         elif max_checkpoint_epoch >= 0:
             print(f"✅ Using checkpoint from epoch {max_checkpoint_epoch + 1}")
             return max_checkpoint_path
@@ -1286,38 +1165,43 @@ class Trainer:
         return None
 
     def _save_epoch_figures(self, train_labels, train_preds, val_labels, val_preds, save_dir):
-        """Save all figures for an epoch in the specified directory"""
-        # Get directory type from path for message
-        dir_type = 'latest' if 'latest' in save_dir else 'best' if 'best' in save_dir else 'checkpoint'
-        epoch = len(self.train_losses)  # Current epoch
+        """Save figures for current epoch in the appropriate directory"""
+        current_epoch = len(
+            self.metrics_history)  # This will match the current epoch number
 
-        # Ensure the save directory exists
-        self._ensure_dir_exists(save_dir)
-
-        # Save confusion matrices and class performance plots
-        if dir_type in ['latest', 'best', 'checkpoint']:
-            # Save confusion matrices
+        # 1. Save training phase figures if available
+        if train_labels is not None and train_preds is not None:
+            # Save confusion matrix for training
             self.plot_confusion_matrix(
-                train_labels, train_preds, save_dir=save_dir, prefix='train')
+                train_labels, train_preds,
+                save_dir=save_dir,
+                prefix='train'
+            )
+
+            # Save per-class performance for training
+            self.plot_class_performance(
+                train_labels, train_preds,
+                save_dir=save_dir,
+                prefix='train'
+            )
+            print(f"📊 Saved training plots for epoch {self.start_epoch + 1}")
+
+        # 2. Save validation phase figures if available
+        if val_labels is not None and val_preds is not None:
+            # Save confusion matrix for validation
             self.plot_confusion_matrix(
-                val_labels, val_preds, save_dir=save_dir, prefix='val')
-            print(f"🔄 Saved {dir_type} confusion matrices at epoch {epoch}")
+                val_labels, val_preds,
+                save_dir=save_dir,
+                prefix='val'
+            )
 
-            # Save class performance plots
+            # Save per-class performance for validation
             self.plot_class_performance(
-                train_labels, train_preds, save_dir=save_dir, prefix='train')
-            self.plot_class_performance(
-                val_labels, val_preds, save_dir=save_dir, prefix='val')
-            print(f"📊 Saved {dir_type} performance plots at epoch {epoch}")
-
-            # Save activation statistics plot
-            if hasattr(self, 'activation_stats') and self.activation_stats:
-                self.plot_activation_stats(save_dir)
-                print(
-                    f"📈 Saved {dir_type} activation statistics at epoch {epoch}")
-
-        # Create and save whole period metrics
-        self.save_whole_period_metrics()
+                val_labels, val_preds,
+                save_dir=save_dir,
+                prefix='val'
+            )
+            print(f"📊 Saved validation plots for epoch {self.start_epoch + 1}")
 
     def save_whole_period_metrics(self):
         """Create and save a metrics plot for the entire training period so far"""
@@ -1356,20 +1240,22 @@ class Trainer:
             (('recall_macro', 'recall_micro'), 'Recall (Macro vs Micro)'),
             (('f1_macro', 'f1_micro'), 'F1 (Macro vs Micro)')
         ]
+        if not hasattr(self, 'metrics_history') or not self.metrics_history:
+            print("⚠️ No metrics history available to plot")
+            return
 
-        for idx, (metric, title) in enumerate(metric_pairs, 1):
-            ax = plt.subplot(2, 2, idx)
+        for i, (metric, title) in enumerate(metric_pairs, 1):
+            ax = fig.add_subplot(2, 2, i)
             ax.set_facecolor('white')
-            ax.grid(True, linestyle='--', alpha=0.3)
 
-            # Use integer x-axis
-            epochs = range(len(self.metrics_history))
+            # Get epochs for x-axis
+            epochs = list(range(1, len(self.metrics_history) + 1))
 
             if isinstance(metric, tuple):
                 # Plot macro metrics
-                train_macro = [m[f'train_{metric[0]}']
+                train_macro = [m.get('train', {}).get(metric[0], 0)
                                for m in self.metrics_history]
-                val_macro = [m[f'val_{metric[0]}']
+                val_macro = [m.get('val', {}).get(metric[0], 0)
                              for m in self.metrics_history]
                 ax.plot(epochs, train_macro, '-', color='#1f77b4',
                         label='Train (Macro)', marker='o', markersize=2)
@@ -1377,18 +1263,18 @@ class Trainer:
                         label='Val (Macro)', marker='o', markersize=2)
 
                 # Plot micro metrics
-                train_micro = [m[f'train_{metric[1]}']
+                train_micro = [m.get('train', {}).get(metric[1], 0)
                                for m in self.metrics_history]
-                val_micro = [m[f'val_{metric[1]}']
+                val_micro = [m.get('val', {}).get(metric[1], 0)
                              for m in self.metrics_history]
                 ax.plot(epochs, train_micro, '-', color='#d62728',
                         label='Train (Micro)', marker='s', markersize=2)
                 ax.plot(epochs, val_micro, '-', color='#ff9999',
                         label='Val (Micro)', marker='s', markersize=2)
             else:
-                train_metric = [m[f'train_{metric}']
+                train_metric = [m.get('train', {}).get(metric, 0)
                                 for m in self.metrics_history]
-                val_metric = [m[f'val_{metric}']
+                val_metric = [m.get('val', {}).get(metric, 0)
                               for m in self.metrics_history]
                 ax.plot(epochs, train_metric, '-', color='#1f77b4',
                         label='Train', marker='o', markersize=2)
@@ -1448,31 +1334,61 @@ class Trainer:
                 return True
             return False
 
-    def _load_fine_tuned_embedding(self, checkpoint_path):
-        """Load fine-tuned embedding model"""
+    def _load_fine_tuned_embedding(self, path: str):
+        """Helper method to load fine-tuned embedding model"""
         try:
-            checkpoint = torch.load(checkpoint_path)
-            if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
-                self.model.embedding_model.load_state_dict(
-                    checkpoint['state_dict'])
-                print(
-                    f"✅ Loaded fine-tuned embedding model from epoch {checkpoint['epoch']}")
-            else:
-                self.model.embedding_model.load_state_dict(checkpoint)
-                print("✅ Loaded fine-tuned embedding model")
+            checkpoint = torch.load(path)
+            self.model.embedding_model.load_state_dict(
+                checkpoint['state_dict'])
+            print(f"✅ Successfully loaded fine-tuned embedding from: {path}")
         except Exception as e:
-            print(f"❌ Error loading fine-tuned embedding model: {str(e)}")
-            raise
+            print(f"⚠️ Error loading fine-tuned embedding: {str(e)}")
+
+    def _save_fine_tuned_embedding(self, epoch: int, is_best: bool = False):
+        """Helper method to save fine-tuned embedding model"""
+        if not self.config.model_settings.fine_tune_embedding:
+            return
+
+        save_dir = os.path.join(
+            self.config.training_settings.fine_tuned_models_dir,
+            self.config.training_settings.task_type,
+            self.config.data_settings.which,
+            self.config.model_settings.embedding_type,
+            self.experiment_name,
+            'best' if is_best else 'latest'
+        )
+
+        os.makedirs(save_dir, exist_ok=True)
+        file_name = 'embedding_model_best.pt' if is_best else 'embedding_model_latest.pt'
+        save_path = os.path.join(save_dir, file_name)
+
+        state_dict = {
+            'epoch': epoch,
+            'state_dict': self.model.embedding_model.state_dict(),
+            'fine_tune_config': {
+                'mode': self.config.model_settings.fine_tune_mode,
+                'unfrozen_layers': [name for name, param in self.model.embedding_model.named_parameters()
+                                    if param.requires_grad],
+                'lr_scales': {name: getattr(param, 'lr_scale', 1.0)
+                              for name, param in self.model.embedding_model.named_parameters()}
+            }
+        }
+
+        torch.save(state_dict, save_path)
+        print(
+            f"💾 Saved {'best' if is_best else 'latest'} fine-tuned embedding at epoch {self.start_epoch + 1}")
 
     def _monitor_training_dynamics(self, epoch: int, batch_idx: int, loss: float, outputs: torch.Tensor, activations: dict):
         """Monitor training dynamics including gradients, activations, and loss patterns"""
         # Only monitor every n batches to reduce overhead
-        monitor_freq = 100  # Adjust as needed
+        # Adjust as needed
+        monitor_freq = len(
+            self.train_loader)
         if batch_idx % monitor_freq != 0:
             return
 
         print(
-            f"\n📊 Training Dynamics Monitor (Epoch {epoch + 1}, Batch {batch_idx}):")
+            f"\n📊 Training Dynamics Monitor (Epoch {epoch + 1}):")
 
         # 1. Monitor Loss
         if loss > 1e3:  # Adjust threshold as needed
@@ -1645,34 +1561,47 @@ class Trainer:
 
     def _save_metrics_data(self, epoch, train_metrics, val_metrics, save_type='latest'):
         """
-        Save metrics data in appropriate directory
+        Save essential metrics data in appropriate directory
         Args:
             epoch: Current epoch number
             train_metrics: Dictionary containing training metrics
             val_metrics: Dictionary containing validation metrics
             save_type: 'latest', 'best', 'checkpoint', or 'final'
         """
-        # Prepare metrics data
+        # Prepare simplified metrics data
         metrics_data = {
-            'train_metrics': {
+            'epoch': epoch + 1,
+            'train': {
                 'loss': self.train_losses[-1],
                 'accuracy': train_metrics['accuracy'],
-                'precision_macro': train_metrics['precision_macro'],
-                'precision_micro': train_metrics['precision_micro'],
-                'recall_macro': train_metrics['recall_macro'],
-                'recall_micro': train_metrics['recall_micro'],
-                'f1_macro': train_metrics['f1_macro'],
-                'f1_micro': train_metrics['f1_micro']
+                'precision': {
+                    'macro': train_metrics['precision_macro'],
+                    'micro': train_metrics['precision_micro']
+                },
+                'recall': {
+                    'macro': train_metrics['recall_macro'],
+                    'micro': train_metrics['recall_micro']
+                },
+                'f1': {
+                    'macro': train_metrics['f1_macro'],
+                    'micro': train_metrics['f1_micro']
+                }
             },
-            'val_metrics': {
+            'val': {
                 'loss': self.val_losses[-1],
                 'accuracy': val_metrics['accuracy'],
-                'precision_macro': val_metrics['precision_macro'],
-                'precision_micro': val_metrics['precision_micro'],
-                'recall_macro': val_metrics['recall_macro'],
-                'recall_micro': val_metrics['recall_micro'],
-                'f1_macro': val_metrics['f1_macro'],
-                'f1_micro': val_metrics['f1_micro']
+                'precision': {
+                    'macro': val_metrics['precision_macro'],
+                    'micro': val_metrics['precision_micro']
+                },
+                'recall': {
+                    'macro': val_metrics['recall_macro'],
+                    'micro': val_metrics['recall_micro']
+                },
+                'f1': {
+                    'macro': val_metrics['f1_macro'],
+                    'micro': val_metrics['f1_micro']
+                }
             }
         }
 
@@ -1697,4 +1626,47 @@ class Trainer:
         with open(metrics_path, 'w') as f:
             json.dump(metrics_data, f, indent=4)
 
-        print(f"📊 Saved {save_type} metrics at epoch {epoch + 1}")
+        print(f"💾 Saved {save_type} metrics at epoch {epoch + 1}")
+
+    def _save_latest_checkpoint(self, epoch, val_metrics):
+        """Save the latest model checkpoint"""
+        # Ensure latest directory exists
+        latest_dir = os.path.join(self.model_dir, 'latest')
+        self._ensure_dir_exists(latest_dir)
+
+        # Save model checkpoint
+        checkpoint = {
+            'epoch': epoch,
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
+            'val_loss': val_metrics['loss'],
+            'train_losses': self.train_losses,
+            'val_losses': self.val_losses,
+            'metrics_history': self.metrics_history
+        }
+
+        latest_model_path = os.path.join(latest_dir, 'model_latest.pt')
+        torch.save(checkpoint, latest_model_path)
+
+        # Save fine-tuned embedding if enabled
+        if self.config.model_settings.fine_tune_embedding:
+            latest_embedding_dir = os.path.join(
+                self.config.training_settings.fine_tuned_models_dir,
+                self.config.training_settings.task_type.lower(),
+                self.config.data_settings.which,
+                self.config.model_settings.embedding_type,
+                self.experiment_name,
+                'latest'
+            )
+            self._ensure_dir_exists(latest_embedding_dir)
+
+            embedding_state = {
+                'epoch': epoch + 1,
+                'state_dict': self.model.embedding_model.state_dict(),
+                'config': self.config.model_settings.to_dict()
+            }
+
+            latest_embedding_path = os.path.join(
+                latest_embedding_dir, 'embedding_model_latest.pt')
+            torch.save(embedding_state, latest_embedding_path)

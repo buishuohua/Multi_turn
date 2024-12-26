@@ -43,22 +43,32 @@ def _loader_data(task_type):
 
     actor_origin = pd.read_csv(actor_path)
     coa_origin = pd.read_csv(coa_path)
+    safe_origin = pd.read_csv(safe_path)
 
     actor = actor_origin.copy(deep=True)
     coa = coa_origin.copy(deep=True)
+    safe = safe_origin.copy(deep=True)
 
-    if task_type == 'identification':
-        # For identification task, include safe data
-        safe_origin = pd.read_csv(safe_path)
-        safe = safe_origin.copy(deep=True)
-        safe = safe.loc[:, ["category", "question", "response", "turn"]]
+    if task_type == 'Identification':
+        # For binary classification: safe vs attack
+        # Combine all attack data and label as 'attack'
+        attack_data = pd.concat([actor, coa], axis=0, ignore_index=True)
+        attack_data['category'] = 'attack'
+        safe['category'] = 'safe'
+        data = pd.concat([attack_data, safe], axis=0, ignore_index=True)
+
+    elif task_type == 'Multi':
+        # For multi-class classification including safe and attack subclasses
+        # Keep original categories for all data
         data = pd.concat([actor, coa, safe], axis=0, ignore_index=True)
-    else:
-        # For classification task, only include attack data
+
+    elif task_type == 'Multi_attack':
+        # For multi-class classification of attack subclasses only
+        # Keep original categories but exclude safe data
         data = pd.concat([actor, coa], axis=0, ignore_index=True)
 
-    actor = actor.loc[:, ["category", "question", "response", "turn"]]
-    coa = coa.loc[:, ["category", "question", "response", "turn"]]
+    else:
+        raise ValueError(f"Unknown task type: {task_type}")
 
     data.reset_index(drop=True, inplace=True)
 

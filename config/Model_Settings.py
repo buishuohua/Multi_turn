@@ -473,7 +473,7 @@ class ModelSettings:
             bidirectional=True,
             fine_tune_embedding=False,
             fine_tune_mode='none',
-            fine_tune_lr=2e-5,
+            fine_tune_lr=1e-6,
             activation='relu',
             final_activation='softmax',
             loss='cross_entropy',
