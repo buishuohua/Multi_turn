@@ -14,8 +14,10 @@ from typing import Tuple, Optional, Dict, Any, List, TYPE_CHECKING
 import math
 import torch.nn.functional as F
 import os
+import numpy as np
 import re
 from models.Attention.multi_head_attention import MultiHeadAttention
+from utils.experiment_utils import create_experiment_name
 if TYPE_CHECKING:
     from config.Experiment_Config import ExperimentConfig
 
@@ -51,63 +53,70 @@ class ModelStateManager:
 
 
 class CheckpointEnsemble:
-    def __init__(self, max_checkpoints=3, min_improvement=1e-4):
+    """Manages an ensemble of model checkpoints for improved performance"""
+
+    def __init__(self, max_checkpoints: int = 3, min_improvement: float = 0.01):
+        """
+        Initialize checkpoint ensemble.
+
+        Args:
+            max_checkpoints (int): Maximum number of checkpoints to keep in ensemble
+            min_improvement (float): Minimum validation loss improvement required
+        """
         self.max_checkpoints = max_checkpoints
         self.min_improvement = min_improvement
-        self.checkpoints = []
-        self.best_loss = float('inf')
+        self.checkpoints = []  # List of (state_dict, val_loss) tuples
 
-    def add_checkpoint(self, state_dict, val_loss):
-        """Add new checkpoint to ensemble if it shows improvement"""
-        # Check if new checkpoint shows sufficient improvement
-        if val_loss < self.best_loss - self.min_improvement:
-            self.best_loss = val_loss
-            self.checkpoints.append({
-                'state_dict': state_dict,
-                'val_loss': val_loss,
-                'weight': 1.0
-            })
+    def add_checkpoint(self, state_dict: dict, val_loss: float) -> bool:
+        """
+        Add a new checkpoint to the ensemble if it improves performance.
 
-            # Keep only best checkpoints
-            if len(self.checkpoints) > self.max_checkpoints:
-                self.checkpoints.sort(key=lambda x: x['val_loss'])
-                self.checkpoints = self.checkpoints[:self.max_checkpoints]
+        Args:
+            state_dict: Model state dictionary
+            val_loss: Validation loss for this checkpoint
 
-            # Update weights based on relative performance
-            self._update_weights()
+        Returns:
+            bool: True if checkpoint was added, False otherwise
+        """
+        # Always add if we have fewer than max checkpoints
+        if len(self.checkpoints) < self.max_checkpoints:
+            self.checkpoints.append((state_dict, val_loss))
+            # Sort by validation loss
+            self.checkpoints.sort(key=lambda x: x[1])
             return True
+
+        # Otherwise, only add if it improves on worst checkpoint by min_improvement
+        worst_loss = self.checkpoints[-1][1]
+        if val_loss < (worst_loss - self.min_improvement):
+            self.checkpoints.pop()  # Remove worst checkpoint
+            self.checkpoints.append((state_dict, val_loss))
+            self.checkpoints.sort(key=lambda x: x[1])
+            return True
+
         return False
 
-    def _update_weights(self):
-        """Update checkpoint weights based on validation loss"""
-        losses = [cp['val_loss'] for cp in self.checkpoints]
-        min_loss = min(losses)
+    def get_ensemble_weights(self) -> Optional[dict]:
+        """
+        Get averaged weights from all checkpoints in ensemble.
 
-        # Calculate weights using softmax
-        weights = [math.exp(-(loss - min_loss)) for loss in losses]
-        sum_weights = sum(weights)
-
-        for cp, w in zip(self.checkpoints, weights):
-            cp['weight'] = w / sum_weights
-
-    def get_ensemble_state(self):
-        """Get weighted ensemble of model states"""
+        Returns:
+            dict: Averaged state dictionary, or None if ensemble is empty
+        """
         if not self.checkpoints:
             return None
 
-        ensemble_state = {}
-        first_state = self.checkpoints[0]['state_dict']
+        # Start with first checkpoint's state dict
+        ensemble_state = self.checkpoints[0][0].copy()
 
-        # Initialize with zeros
-        for key in first_state:
-            ensemble_state[key] = torch.zeros_like(first_state[key])
+        # Add remaining checkpoints
+        for state_dict, _ in self.checkpoints[1:]:
+            for key in ensemble_state:
+                ensemble_state[key] += state_dict[key]
 
-        # Weighted sum of states
-        for checkpoint in self.checkpoints:
-            weight = checkpoint['weight']
-            state = checkpoint['state_dict']
-            for key in state:
-                ensemble_state[key] += state[key] * weight
+        # Average the parameters
+        n = len(self.checkpoints)
+        for key in ensemble_state:
+            ensemble_state[key] /= n
 
         return ensemble_state
 
@@ -133,7 +142,6 @@ class BaseLSTM(nn.Module, ABC):
             self.checkpoint_ensemble = None
 
         # Create model-specific experiment name
-        from utils.experiment_utils import create_experiment_name
         self.experiment_name = create_experiment_name(config, is_model=False)
 
         # Get embedding model
@@ -168,22 +176,24 @@ class BaseLSTM(nn.Module, ABC):
         self._initialize_weights()
 
     def _load_or_create_embedding_model(self):
-        """Load embedding model with combined periodic and plateau strategies"""
+        """Load embedding model with combined strategies"""
         embedding_model = self.config.tokenizer_settings.get_model().model
         self._configure_fine_tuning(embedding_model)
 
         if self.config.training_settings.continue_training:
             should_load = False
-            load_type = 'best'  # default load type
 
-            # Check for periodic loading
+            # Calculate adaptive reload frequency
+            base_freq = self.config.model_settings.fine_tune_reload_freq
+            # Decrease by 1 every 100 epochs
+            adaptive_freq = max(5, base_freq - (self.current_epoch // 100))
+
+            # Check for periodic loading with adaptive frequency
             if 'periodic' in self.config.model_settings.fine_tune_loading_strategies:
-                if (self.current_epoch % self.config.model_settings.fine_tune_reload_freq == 0):
+                if (self.current_epoch % adaptive_freq == 0):
                     should_load = True
-                    # Use latest model in later epochs
-                    load_type = 'latest' if self.current_epoch > self.config.training_settings.num_epochs // 2 else 'best'
                     print(
-                        f"🔄 Periodic reload triggered at epoch {self.current_epoch}")
+                        f"🔄 Adaptive periodic reload triggered at epoch {self.current_epoch} (freq={adaptive_freq})")
 
             # Check for plateau detection
             if 'plateau' in self.config.model_settings.fine_tune_loading_strategies:
@@ -191,13 +201,22 @@ class BaseLSTM(nn.Module, ABC):
                     recent_losses = self.val_loss_history[-self.config.model_settings.plateau_patience:]
                     if max(recent_losses) - min(recent_losses) < self.config.model_settings.plateau_threshold:
                         should_load = True
-                        load_type = 'best'  # Always use best model for plateau recovery
                         print(
-                            f"📊 Plateau detected at epoch {self.current_epoch}, loading best model")
+                            f"📊 Plateau detected at epoch {self.current_epoch}")
 
-            if should_load:
-                self._load_model_weights(embedding_model, load_type)
-                print(f"✅ Loaded {load_type} model weights")
+            if should_load and hasattr(self, 'checkpoint_ensemble') and self.checkpoint_ensemble is not None:
+                # Get ensemble weights
+                try:
+                    ensemble_state = self.checkpoint_ensemble.get_ensemble_weights()
+                    if ensemble_state is not None:
+                        embedding_model.load_state_dict(ensemble_state)
+                        print("✨ Loaded ensemble weights")
+                    else:
+                        self._load_model_weights(embedding_model, 'best')
+                        print("⚠️ No ensemble weights available, loaded best weights")
+                except Exception as e:
+                    print(
+                        f"⚠️ Warning: Failed to load ensemble weights: {str(e)}")
 
         return embedding_model
 
@@ -373,17 +392,6 @@ class BaseLSTM(nn.Module, ABC):
             return x
 
         return attention_module(x)
-
-    def init_hidden(self, batch_size: int) -> List[Tuple[torch.Tensor, torch.Tensor]]:
-        """Initialize hidden states for each LSTM layer"""
-        hidden_states = []
-        for hidden_size in self.config.model_settings.hidden_dims:
-            num_directions = 2 if self.config.model_settings.bidirectional else 1
-            weight = next(self.parameters())
-            h0 = weight.new_zeros(num_directions, batch_size, hidden_size)
-            c0 = weight.new_zeros(num_directions, batch_size, hidden_size)
-            hidden_states.append((h0, c0))
-        return hidden_states
 
     def _create_res_projections(self) -> Optional[nn.ModuleList]:
         """Create projection layers for residual connections when dimensions don't match"""

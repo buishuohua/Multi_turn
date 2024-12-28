@@ -110,14 +110,29 @@ class ModelSettings:
     layer_norm_elementwise: bool = False
     layer_norm_affine: bool = True  # Whether to use learnable affine parameters
 
-    # Add new fine-tune loading strategy
-    fine_tune_loading_strategies: List[Literal['periodic', 'adaptive', 'plateau', 'ensemble']] = \
-        field(default_factory=lambda: ['periodic', 'plateau'])
+    # Fine-tuning loading strategies
+    fine_tune_loading_strategies: List[str] = field(
+        default_factory=lambda: ['periodic', 'adaptive', 'plateau', 'ensemble']
+    )
+    fine_tune_reload_freq: int = 20  # For periodic loading
+    adaptive_base_freq: int = 10      # For adaptive loading
+    plateau_patience: int = 5         # For plateau loading
+    plateau_threshold: float = 0.01   # For plateau loading
+    ensemble_max_checkpoints: int = 3  # For ensemble loading
+    ensemble_min_improvement: float = 0.01  # For ensemble loading
 
-    # Strategy parameters
-    fine_tune_reload_freq: int = 20        # For periodic loading
-    plateau_patience: int = 5              # For plateau detection
-    plateau_threshold: float = 1e-4        # Minimum improvement threshold
+    # Add new attention learning rate settings
+    attention_lr: float = 1e-6  # Default learning rate for attention parameters
+    attention_lr_scale: float = 0.1  # Scale factor relative to base learning rate
+    attention_weight_decay: float = 0.01  # Weight decay for attention parameters
+    attention_warmup_steps: int = 1000  # Warmup steps for attention parameters
+
+    # Add embedding weight decay settings
+    # Default weight decay for embedding parameters
+    embedding_weight_decay: float = 0.01
+    embedding_warmup_steps: int = 1000    # Warmup steps for embedding parameters
+    # Scale factor relative to base learning rate
+    embedding_lr_scale: float = 0.1
 
     def __post_init__(self):
         """Validate settings after initialization"""
@@ -440,12 +455,21 @@ class ModelSettings:
         if self.use_attention:
             errors = []
 
+            # Add validation for new attention learning parameters
+            if self.attention_lr <= 0:
+                errors.append("attention_lr must be positive")
+            if self.attention_lr_scale <= 0:
+                errors.append("attention_lr_scale must be positive")
+            if self.attention_weight_decay < 0:
+                errors.append("attention_weight_decay must be non-negative")
+            if self.attention_warmup_steps < 0:
+                errors.append("attention_warmup_steps must be non-negative")
+
+            # Existing validations
             if self.num_attention_heads <= 0:
                 errors.append("num_attention_heads must be positive")
-
             if not 0 <= self.attention_dropout <= 1:
                 errors.append("attention_dropout must be between 0 and 1")
-
             if self.attention_temperature <= 0:
                 errors.append("attention_temperature must be positive")
 
@@ -462,7 +486,11 @@ class ModelSettings:
             'dim': self.attention_dim,
             'num_heads': self.num_attention_heads,
             'dropout': self.attention_dropout,
-            'temperature': self.attention_temperature
+            'temperature': self.attention_temperature,
+            'lr': self.attention_lr,
+            'lr_scale': self.attention_lr_scale,
+            'weight_decay': self.attention_weight_decay,
+            'warmup_steps': self.attention_warmup_steps
         }
 
     def get_fine_tuning_config(self) -> Dict:
@@ -505,8 +533,67 @@ class ModelSettings:
             })
 
         return config
+    def get_layers_to_unfreeze_at_epoch(self, epoch: int) -> List[int]:
+        """
+        Determine which layers should be unfrozen at the current epoch.
+        
+        Args:
+            epoch (int): Current training epoch
+            
+        Returns:
+            List[int]: List of layer indices to unfreeze
+        """
+        if self.fine_tune_mode != 'gradual':
+            return []
 
-    @ classmethod
+        # Calculate how many layers should be unfrozen by this epoch
+        layers_per_step = max(1, self.num_frozen_layers //
+                              (self.gradual_unfreeze_epochs or 1))
+        current_step = epoch // (self.gradual_unfreeze_epochs or 1)
+
+        # Calculate which layers should be unfrozen
+        total_layers_to_unfreeze = min(
+            current_step * layers_per_step,
+            self.num_frozen_layers
+        )
+
+        # Generate list of layer indices to unfreeze
+        # We unfreeze from last layer (highest index) to first layer
+        if total_layers_to_unfreeze > 0:
+            start_idx = self.num_frozen_layers - total_layers_to_unfreeze
+            end_idx = self.num_frozen_layers
+            layers_to_unfreeze = list(range(start_idx, end_idx))
+        else:
+            layers_to_unfreeze = []
+
+        print(f"\n🔄 Gradual unfreezing at epoch {epoch}:")
+        print(f"  • Total layers to unfreeze: {total_layers_to_unfreeze}")
+        print(f"  • Layers being unfrozen: {layers_to_unfreeze}")
+
+        return layers_to_unfreeze
+
+    def get_layer_learning_rate(self, layer_idx: int) -> float:
+        """
+        Get the learning rate for a specific layer based on its position.
+
+        Args:
+            layer_idx (int): Index of the layer
+
+        Returns:
+            float: Learning rate for the layer
+        """
+        if not self.use_discriminative_lr:
+            return self.fine_tune_lr
+
+        # Calculate discriminative learning rate
+        # Later layers (higher indices) get higher learning rates
+        layer_position = layer_idx / max(1, self.num_frozen_layers)
+        lr_multiplier = self.lr_decay_factor ** (1 - layer_position)
+
+        return self.fine_tune_lr * lr_multiplier
+    
+
+    @classmethod
     def get_default(cls):
         return cls(
             output_dim=None,  # Will be set automatically by Trainer
@@ -541,7 +628,14 @@ class ModelSettings:
             # Default residual network settings
             use_res_net=False,
             res_dropout=0.1,
-            fine_tune_reload_freq=20
+            fine_tune_reload_freq=20,
+            fine_tune_loading_strategies=[
+                'periodic', 'adaptive', 'plateau', 'ensemble'],
+            adaptive_base_freq=10,
+            plateau_patience=5,
+            plateau_threshold=0.01,
+            ensemble_max_checkpoints=3,
+            ensemble_min_improvement=0.01
         )
 
     @classmethod

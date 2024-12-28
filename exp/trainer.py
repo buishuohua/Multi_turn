@@ -22,7 +22,7 @@ import numpy as np
 import pandas as pd
 import time
 from utils.experiment_utils import create_experiment_name
-
+import torch.nn as nn
 if TYPE_CHECKING:
     from config.Experiment_Config import ExperimentConfig
 else:
@@ -87,41 +87,104 @@ class Trainer:
         # Initialize training components with separate learning rates
         self.criterion = self.config.model_settings.get_loss()
 
-        # Separate parameters into embedding and non-embedding groups
-        if config.model_settings.fine_tune_embedding:
-            # Parameters for fine-tuning embedding
-            embedding_params = []
-            # Parameters for the rest of the model
-            other_params = []
+        # Initialize parameter lists
+        embedding_params = {'params': []}
+        attention_params = {'params': []}
+        other_params = {'params': []}
 
-            for name, param in self.model.named_parameters():
-                if 'embedding_model' in name:
-                    if param.requires_grad:  # Only include if requires gradient
-                        # Check if parameter has custom learning rate scale
-                        lr_scale = getattr(param, 'lr_scale', 1.0)
-                        embedding_params.append({
-                            'params': param,
-                            'lr': config.model_settings.fine_tune_lr * lr_scale
-                        })
-                else:
-                    other_params.append({
-                        'params': param,
-                        'lr': config.training_settings.learning_rate
-                    })
+        # Get scheduler group settings
+        scheduler_groups = config.training_settings.scheduler_groups
 
-            # Combine both parameter groups
-            all_params = embedding_params + other_params
-        else:
-            # If not fine-tuning, use single learning rate for all parameters
-            all_params = self.model.parameters()
+        print("\nGrouping parameters...")
+        for name, param in self.model.named_parameters():
+            if not param.requires_grad:
+                continue
+
+            # Debug print
+            print(f"Processing parameter: {name}")
+
+            # Check for attention parameters first (both BERT and custom attention)
+            if any(attn_term in name for attn_term in [
+                'attention.self.query', 'attention.self.key', 'attention.self.value',
+                'attention.output', 'q_projs', 'k_projs', 'v_projs', 'out_proj'
+            ]):
+                attention_params['params'].append(param)
+                attention_params['lr'] = scheduler_groups['attention']['initial_lr']
+                attention_params['weight_decay'] = config.training_settings.weight_decay
+                print(f"  → Attention parameter")
+
+            # Then check for embedding parameters
+            elif 'embedding_model' in name and not any(attn_term in name for attn_term in ['attention', 'self']):
+                embedding_params['params'].append(param)
+                embedding_params['lr'] = scheduler_groups['embedding']['initial_lr']
+                embedding_params['weight_decay'] = config.training_settings.weight_decay
+                print(f"  → Embedding parameter")
+
+            # Everything else goes to other
+            else:
+                other_params['params'].append(param)
+                other_params['lr'] = scheduler_groups['other']['initial_lr']
+                other_params['weight_decay'] = config.training_settings.weight_decay
+                print(f"  → Other parameter")
+
+        # Only include non-empty parameter groups
+        all_params = []
+        if embedding_params['params']:
+            all_params.append(embedding_params)
+            print(f"\nEmbedding parameters: {len(embedding_params['params'])}")
+        if attention_params['params']:
+            all_params.append(attention_params)
+            print(f"Attention parameters: {len(attention_params['params'])}")
+        if other_params['params']:
+            all_params.append(other_params)
+            print(f"Other parameters: {len(other_params['params'])}")
+
+        print(f"\nTotal parameter groups: {len(all_params)}")
+
+        # Ensure we have exactly 3 groups
+        if len(all_params) != 3:
+            # If any group is empty, add it with dummy parameter to maintain group structure
+            if not embedding_params['params']:
+                dummy_param = nn.Parameter(torch.zeros(1, requires_grad=True))
+                embedding_params['params'] = [dummy_param]
+                embedding_params['lr'] = scheduler_groups['embedding']['initial_lr']
+                all_params.append(embedding_params)
+                print("Added dummy embedding group")
+
+            if not attention_params['params']:
+                dummy_param = nn.Parameter(torch.zeros(1, requires_grad=True))
+                attention_params['params'] = [dummy_param]
+                attention_params['lr'] = scheduler_groups['attention']['initial_lr']
+                all_params.append(attention_params)
+                print("Added dummy attention group")
+
+            if not other_params['params']:
+                dummy_param = nn.Parameter(torch.zeros(1, requires_grad=True))
+                other_params['params'] = [dummy_param]
+                other_params['lr'] = scheduler_groups['other']['initial_lr']
+                all_params.append(other_params)
+                print("Added dummy other group")
 
         # Initialize optimizer with parameter groups
         self.optimizer = self.config.training_settings.get_optimizer(
             all_params)
 
+        # Print optimizer parameter groups
+        print("\nOptimizer parameter groups:")
+        for idx, group in enumerate(self.optimizer.param_groups):
+            print(
+                f"Group {idx}: {len(list(group['params']))} parameters, lr={group['lr']}")
+
         # Initialize scheduler
         self.scheduler = self.config.training_settings.get_scheduler(
             self.optimizer)
+
+        # Initialize learning rate history tracking
+        self.lr_history = {
+            'embedding': [],
+            'attention': [],
+            'other': []
+        }
 
         # Initialize best validation loss
         self.best_val_loss = float('inf')
@@ -205,16 +268,34 @@ class Trainer:
 
             # 4. Load scheduler state if it exists and scheduler is configured
             if self.scheduler is not None and 'scheduler_state_dict' in checkpoint:
-                self.scheduler.load_state_dict(
-                    checkpoint['scheduler_state_dict'])
+                # Check if using multi-group scheduler
+                if isinstance(self.scheduler, self.config.training_settings.MultiGroupLRScheduler):
+                    scheduler_state = checkpoint['scheduler_state_dict']
+                    # Validate scheduler state matches current configuration
+                    if (len(scheduler_state['warmup_steps']) == len(self.scheduler.warmup_steps) and
+                            len(scheduler_state['decay_factors']) == len(self.scheduler.decay_factors)):
+                        self.scheduler.load_state_dict(scheduler_state)
+                    else:
+                        print(
+                            "⚠️ Warning: Scheduler configuration mismatch, initializing new scheduler")
+                else:
+                    self.scheduler.load_state_dict(
+                        checkpoint['scheduler_state_dict'])
 
-            # 5. Load training history directly
+            # 5. Load training history
             self.train_losses = checkpoint.get('train_losses', [])
             self.val_losses = checkpoint.get('val_losses', [])
             self.metrics_history = checkpoint.get('metrics_history', [])
             self.best_val_loss = checkpoint.get('val_loss', float('inf'))
 
-            # 6. Load corresponding embedding state if fine-tuning is enabled
+            # 6. Load learning rate history if it exists
+            self.lr_history = checkpoint.get('lr_history', {
+                'embedding': [],
+                'attention': [],
+                'other': []
+            })
+
+            # 7. Load corresponding embedding state if fine-tuning is enabled
             if self.config.model_settings.fine_tune_embedding:
                 embedding_path = self._get_corresponding_embedding_path(
                     checkpoint_path)
@@ -598,7 +679,7 @@ class Trainer:
         print(f"{'═' * 65}")  # Bottom border
 
     def train(self):
-        """Main training loop with improved model loading"""
+        """Main training loop with learning rate scheduling"""
         # 1. Handle training continuation
         if self.continue_training:
             latest_checkpoint = self._find_latest_checkpoint()
@@ -622,13 +703,15 @@ class Trainer:
         # 2. Main training loop
         for epoch in range(self.start_epoch, self.config.training_settings.num_epochs):
             # Update current epoch in model before training
-            if not (self.continue_training and epoch == self.start_epoch):
-                self.model.update_epoch(epoch)
+            self.model.update_epoch(epoch)
 
             print(f"\n{'─'*50}")
             print(
                 f"⏳ Epoch {epoch + 1}/{self.config.training_settings.num_epochs}")
             print(f"{'─'*50}")
+
+            # Log current learning rates before training
+            self._log_learning_rates(epoch)
 
             # Train one epoch
             train_metrics, train_preds, train_labels = self.train_epoch()
@@ -639,6 +722,7 @@ class Trainer:
 
             # Update metrics history
             self._update_tracking(train_metrics, val_metrics)
+
 
             # Save latest figures and metrics
             latest_dir = os.path.join(self.figures_dir, 'latest')
@@ -653,10 +737,23 @@ class Trainer:
             current_val_loss = val_metrics['loss']
             is_best = current_val_loss < self.best_val_loss
 
+            # Update learning rates based on scheduler type
+            if self.scheduler is not None:
+                if isinstance(self.scheduler, self.config.training_settings.MultiGroupLRScheduler):
+                    self.scheduler.step(current_val_loss)
+                else:
+                    self.scheduler.step()
+
+            # Track learning rates
+            self._update_lr_history()
+            
             # Add this: Save latest fine-tuned embedding if enabled
             if self.config.model_settings.fine_tune_embedding:
                 self._save_fine_tuned_embedding(
                     epoch, is_best=False)  # This will save as latest
+                self.model.save_checkpoint(current_val_loss)
+                self.model._load_or_create_embedding_model()
+                self.model.update_gradual_unfreezing(epoch)
 
             self.save_checkpoint(epoch, val_metrics['loss'], is_best=is_best)
 
@@ -699,6 +796,8 @@ class Trainer:
                 # Save best fine-tuned embedding if enabled
                 if self.config.model_settings.fine_tune_embedding:
                     self._save_fine_tuned_embedding(epoch, is_best=True)
+            else:
+                self.patience_counter += 1
 
             # Early stopping check
             if self.patience_counter >= self.config.training_settings.early_stopping_patience:
@@ -711,33 +810,6 @@ class Trainer:
 
             # Save whole period metrics
             self.save_whole_period_metrics()
-
-            # Handle model loading strategies
-            should_reload = False
-            load_type = 'best'
-
-            # Check periodic loading
-            if 'periodic' in self.config.model_settings.fine_tune_loading_strategies:
-                if (epoch + 1) % self.config.model_settings.fine_tune_reload_freq == 0:
-                    should_reload = True
-                    # Use latest model in later epochs
-                    load_type = 'latest' if epoch > self.config.training_settings.num_epochs // 2 else 'best'
-                    print(f"🔄 Periodic reload scheduled for epoch {epoch + 1}")
-
-            # Check plateau detection
-            if 'plateau' in self.config.model_settings.fine_tune_loading_strategies:
-                if len(self.val_losses) >= self.config.model_settings.plateau_patience:
-                    recent_losses = self.val_losses[-self.config.model_settings.plateau_patience:]
-                    if max(recent_losses) - min(recent_losses) < self.config.model_settings.plateau_threshold:
-                        should_reload = True
-                        load_type = 'best'  # Always use best model for plateau recovery
-                        print(f"📊 Plateau detected at epoch {epoch + 1}")
-
-            # Reload model if needed
-            if should_reload:
-                self.model._load_model_weights(
-                    self.model.embedding_model, load_type)
-                print(f"✅ Reloaded {load_type} model weights")
 
             # Early stopping check
             if self.patience_counter >= self.config.training_settings.early_stopping_patience:
@@ -977,9 +1049,11 @@ class Trainer:
         print(f"- Embedding Type: {self.config.model_settings.embedding_type}")
         print(f"- Architecture:")
         if self.config.model_settings.custom_hidden_dims is not None:
-            print(f"  • Hidden Dimensions: {self.config.model_settings.custom_hidden_dims}")
+            print(
+                f"  • Hidden Dimensions: {self.config.model_settings.custom_hidden_dims}")
         else:
-            print(f"  • Initial Hidden Dim: {self.config.model_settings.init_hidden_dim}")
+            print(
+                f"  • Initial Hidden Dim: {self.config.model_settings.init_hidden_dim}")
         print(f"  • Number of Layers: {self.config.model_settings.num_layers}")
         print(f"  • Bidirectional: {self.config.model_settings.bidirectional}")
         print(f"  • Dropout Rate: {self.config.model_settings.dropout_rate}")
@@ -988,41 +1062,59 @@ class Trainer:
         print("\n🎯 Attention Configuration:")
         print(f"- Use Attention: {self.config.model_settings.use_attention}")
         if self.config.model_settings.use_attention:
-            print(f"  • Number of Heads: {self.config.model_settings.num_attention_heads}")
-            print(f"  • Attention Positions: {self.config.model_settings.attention_positions}")
-            print(f"  • Attention Dropout: {self.config.model_settings.attention_dropout}")
-            print(f"  • Temperature: {self.config.model_settings.attention_temperature}")
+            print(
+                f"  • Number of Heads: {self.config.model_settings.num_attention_heads}")
+            print(
+                f"  • Attention Positions: {self.config.model_settings.attention_positions}")
+            print(
+                f"  • Attention Dropout: {self.config.model_settings.attention_dropout}")
+            print(
+                f"  • Temperature: {self.config.model_settings.attention_temperature}")
 
         # Architecture features
         print("\n🏗️ Architecture Features:")
-        print(f"- Residual Connections: {self.config.model_settings.use_res_net}")
+        print(
+            f"- Residual Connections: {self.config.model_settings.use_res_net}")
         if self.config.model_settings.use_res_net:
-            print(f"  • Residual Dropout: {self.config.model_settings.res_dropout}")
-        print(f"- Layer Normalization: {self.config.model_settings.use_layer_norm}")
+            print(
+                f"  • Residual Dropout: {self.config.model_settings.res_dropout}")
+        print(
+            f"- Layer Normalization: {self.config.model_settings.use_layer_norm}")
         if self.config.model_settings.use_layer_norm:
-            print(f"  • Layer Norm Epsilon: {self.config.model_settings.layer_norm_eps}")
-            print(f"  • Elementwise: {self.config.model_settings.layer_norm_elementwise}")
-            print(f"  • Affine Transform: {self.config.model_settings.layer_norm_affine}")
+            print(
+                f"  • Layer Norm Epsilon: {self.config.model_settings.layer_norm_eps}")
+            print(
+                f"  • Elementwise: {self.config.model_settings.layer_norm_elementwise}")
+            print(
+                f"  • Affine Transform: {self.config.model_settings.layer_norm_affine}")
 
         # Fine-tuning configuration
         print("\n🔄 Fine-tuning Configuration:")
-        print(f"- Fine-tune Embedding: {self.config.model_settings.fine_tune_embedding}")
+        print(
+            f"- Fine-tune Embedding: {self.config.model_settings.fine_tune_embedding}")
         if self.config.model_settings.fine_tune_embedding:
             print(f"  • Mode: {self.config.model_settings.fine_tune_mode}")
-            print(f"  • Learning Rate: {self.config.model_settings.fine_tune_lr}")
-            print(f"  • Loading Strategies: {self.config.model_settings.fine_tune_loading_strategies}")
-            print(f"  • Reload Frequency: {self.config.model_settings.fine_tune_reload_freq}")
+            print(
+                f"  • Learning Rate: {self.config.model_settings.fine_tune_lr}")
+            print(
+                f"  • Loading Strategies: {self.config.model_settings.fine_tune_loading_strategies}")
+            print(
+                f"  • Reload Frequency: {self.config.model_settings.fine_tune_reload_freq}")
             if 'plateau' in self.config.model_settings.fine_tune_loading_strategies:
-                print(f"  • Plateau Patience: {self.config.model_settings.plateau_patience}")
-                print(f"  • Plateau Threshold: {self.config.model_settings.plateau_threshold}")
+                print(
+                    f"  • Plateau Patience: {self.config.model_settings.plateau_patience}")
+                print(
+                    f"  • Plateau Threshold: {self.config.model_settings.plateau_threshold}")
             if self.config.model_settings.use_discriminative_lr:
-                print(f"  • LR Decay Factor: {self.config.model_settings.lr_decay_factor}")
+                print(
+                    f"  • LR Decay Factor: {self.config.model_settings.lr_decay_factor}")
 
         # Training configuration
         print("\n⚙️ Training Configuration:")
         print(f"- Batch Size: {self.config.training_settings.batch_size}")
         print(f"- Max Length: {self.config.tokenizer_settings.max_length}")
-        print(f"- Learning Rate: {self.config.training_settings.learning_rate}")
+        print(
+            f"- Learning Rate: {self.config.training_settings.learning_rate}")
         print(f"- Weight Decay: {self.config.training_settings.weight_decay}")
         print(f"- Num Epochs: {self.config.training_settings.num_epochs}")
         print(f"- Loss Function: {self.config.model_settings.loss}")
@@ -1030,26 +1122,36 @@ class Trainer:
             print(f"  • Focal Alpha: {self.config.model_settings.focal_alpha}")
             print(f"  • Focal Gamma: {self.config.model_settings.focal_gamma}")
         elif self.config.model_settings.loss == 'label_smoothing_ce':
-            print(f"  • Smoothing Factor: {self.config.model_settings.label_smoothing}")
+            print(
+                f"  • Smoothing Factor: {self.config.model_settings.label_smoothing}")
         print(f"- Optimizer: {self.config.training_settings.optimizer_type}")
         if self.config.training_settings.gradient_clip:
-            print(f"- Gradient Clipping: {self.config.training_settings.gradient_clip}")
-        
+            print(
+                f"- Gradient Clipping: {self.config.training_settings.gradient_clip}")
+
         # Early stopping and scheduler
         print("\n📈 Training Control:")
-        print(f"- Early Stopping Patience: {self.config.training_settings.early_stopping_patience}")
-        print(f"- Scheduler Patience: {self.config.training_settings.scheduler_patience}")
-        print(f"- Scheduler Factor: {self.config.training_settings.scheduler_factor}")
-        print(f"- Min Learning Rate: {self.config.training_settings.min_learning_rate}")
-        print(f"- Checkpoint Frequency: {self.config.training_settings.checkpoint_freq}")
+        print(
+            f"- Early Stopping Patience: {self.config.training_settings.early_stopping_patience}")
+        print(
+            f"- Scheduler Patience: {self.config.training_settings.scheduler_patience}")
+        print(
+            f"- Scheduler Factor: {self.config.training_settings.scheduler_factor}")
+        print(
+            f"- Min Learning Rate: {self.config.training_settings.min_learning_rate}")
+        print(
+            f"- Checkpoint Frequency: {self.config.training_settings.checkpoint_freq}")
 
         # Data configuration
         print("\n📊 Data Configuration:")
         print(f"- Task Type: {self.config.training_settings.task_type}")
-        print(f"- Imbalanced Strategy: {self.config.data_settings.imbalanced_strategy}")
+        print(
+            f"- Imbalanced Strategy: {self.config.data_settings.imbalanced_strategy}")
         if self.config.data_settings.imbalanced_strategy == 'weighted_sampler':
-            print(f"  • Alpha: {self.config.data_settings.weighted_sampler_alpha}")
-        print(f"- Number of Classes: {len(self.config.data_settings.class_names)}")
+            print(
+                f"  • Alpha: {self.config.data_settings.weighted_sampler_alpha}")
+        print(
+            f"- Number of Classes: {len(self.config.data_settings.class_names)}")
 
         # Dataset information
         print("\n📚 Dataset Information:")
@@ -1638,3 +1740,20 @@ class Trainer:
             json.dump(metrics_data, f, indent=4)
 
         print(f"{icon} Saved {save_type} metrics at epoch {epoch + 1}")
+
+    def _log_learning_rates(self, epoch):
+        """Log current learning rates for each parameter group"""
+        print(f"\nLearning rates at epoch {epoch + 1}:")
+        for idx, group in enumerate(self.optimizer.param_groups):
+            group_type = ('embedding' if idx == 0 else
+                          'attention' if idx == 1 else
+                          'other')
+            print(f"  {group_type}: {group['lr']:.2e}")
+
+    def _update_lr_history(self):
+        """Update learning rate history for plotting"""
+        for idx, group in enumerate(self.optimizer.param_groups):
+            group_type = ('embedding' if idx == 0 else
+                          'attention' if idx == 1 else
+                          'other')
+            self.lr_history[group_type].append(group['lr'])

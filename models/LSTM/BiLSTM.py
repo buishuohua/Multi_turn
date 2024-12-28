@@ -77,17 +77,14 @@ class BiLSTM(BaseLSTM):
             embedded = self.apply_attention(
                 embedded, self.attention_modules['embedding'])
 
-        # Initialize hidden states
-        hidden_states = self.init_hidden(x.size(0))
-
         # Process through LSTM layers with attention
         lstm_out = embedded
         for i, lstm_layer in enumerate(self.lstm):
             # Store residual
             residual = lstm_out
 
-            # LSTM forward pass
-            lstm_out, (h, c) = lstm_layer(lstm_out, hidden_states[i])
+            # LSTM forward pass - let PyTorch handle hidden state initialization
+            lstm_out, _ = lstm_layer(lstm_out)
 
             # Apply attention between LSTM layers
             if i < len(self.lstm) - 1 and self.attention_modules.get('inter_lstm'):
