@@ -10,14 +10,14 @@
 from dataclasses import dataclass
 from typing import Literal, Optional
 from models.Embedding.BERT_tokenizer import BERTs
-from models.Embedding.GloVe import GloVes
+from models.Embedding.T5 import T5s
 
 
 @dataclass
 class TokenizerSettings:
-    name: str  # e.g., "BERT_base_uncased" or "glove_100d"
+    name: str  # e.g., "BERT_base_uncased" or "glove_100"
     truncation: str
-    embedding_type: Literal['bert', 'glove', 'word2vec']
+    embedding_type: Literal['bert', 't5']
     max_length: Optional[int] = None
     padding: bool = True
     add_special_tokens: bool = True
@@ -26,9 +26,11 @@ class TokenizerSettings:
         MAX_LENGTHS = {
             'BERT_base_uncased': 512,
             'BERT_large_uncased': 512,
-            'RoBERTa_base': 512,
-            'glove_100d': 1000,
-            'glove_300d': 1000
+            'BERT_base_multilingual_cased': 512,
+            'XLM_roberta_large': 512,
+            'T5_small': 512,
+            'T5_base': 512,
+            'T5_large': 512,
         }
 
         if self.max_length is None:
@@ -44,8 +46,8 @@ class TokenizerSettings:
     def get_model(self):
         if self.embedding_type == 'bert':
             return BERTs.get_tokenizer(self.name)
-        elif self.embedding_type == 'glove':
-            return GloVes.get_tokenizer(self.name)
+        elif self.embedding_type == 't5':
+            return T5s.get_tokenizer(self.name)
         else:
             raise ValueError(
                 f"Unsupported embedding type: {self.embedding_type}")

@@ -9,8 +9,10 @@
 
 from dataclasses import dataclass, field
 from typing import List, Optional, Literal, Union, Dict
-import torch.nn as nn
+
+# Move torch imports after other imports
 import torch
+import torch.nn as nn
 from transformers import AutoConfig
 
 
@@ -19,8 +21,8 @@ class ModelSettings:
     """Model architecture settings"""
     output_dim: Optional[int] = None  # Make it optional, will be set by Trainer
     embedding_dim: Optional[int] = None  # Now optional
-    embedding_type: Literal['BERT_base_uncased', 'BERT_large_uncased',
-                            'RoBERTa_base', 'glove_100d', 'glove_300d'] = 'BERT_base_uncased'
+    embedding_type: Literal['BERT_base_uncased', 'BERT_large_uncased', 'BERT_base_multilingual_cased',
+                            'XLM_roberta_base', 'XLM_roberta_large', 'T5_small', 'T5_base', 'T5_large'] = 'BERT_base_uncased'
 
     # Optional parameters (with defaults)
     init_hidden_dim: Optional[int] = 256  # Make it optional
@@ -90,10 +92,10 @@ class ModelSettings:
 
     # Add new attention-related parameters
     use_attention: bool = True
-    attention_type: Literal['dot', 'general', 'concat',
-                            'scaled_dot', 'multi_head'] = 'scaled_dot'
-    attention_dim: Optional[int] = None  # Will default to hidden_dim if None
-    num_attention_heads: int = 8  # For multi-head attention
+    attention_positions: List[str] = field(
+        default_factory=lambda: ['embedding', 'inter_lstm', 'output']
+    )
+    num_attention_heads: int = 8
     attention_dropout: float = 0.1
     attention_temperature: float = 1.0  # Scaling factor for attention scores
 
@@ -107,6 +109,15 @@ class ModelSettings:
     # True for elementwise, False for layerwise
     layer_norm_elementwise: bool = False
     layer_norm_affine: bool = True  # Whether to use learnable affine parameters
+
+    # Add new fine-tune loading strategy
+    fine_tune_loading_strategies: List[Literal['periodic', 'adaptive', 'plateau', 'ensemble']] = \
+        field(default_factory=lambda: ['periodic', 'plateau'])
+
+    # Strategy parameters
+    fine_tune_reload_freq: int = 20        # For periodic loading
+    plateau_patience: int = 5              # For plateau detection
+    plateau_threshold: float = 1e-4        # Minimum improvement threshold
 
     def __post_init__(self):
         """Validate settings after initialization"""
@@ -143,10 +154,6 @@ class ModelSettings:
         if self.output_dim is not None and self.output_dim <= 0:
             raise ValueError("output_dim must be positive")
 
-        # Set attention dimension if not provided
-        if self.use_attention and self.attention_dim is None:
-            self.attention_dim = self.init_hidden_dim
-
         # Validate attention settings
         self._validate_attention_settings()
 
@@ -165,13 +172,19 @@ class ModelSettings:
                     for i, layer in enumerate(sorted(self.selective_layers, reverse=True))
                 }
 
+        self._validate_fine_tune_settings()
+
     def _get_model_name(self) -> str:
         """Convert embedding type to huggingface model name"""
         model_names = {
             'BERT_base_uncased': 'bert-base-uncased',
             'BERT_large_uncased': 'bert-large-uncased',
-            'RoBERTa_base': 'roberta-base',
-            'RoBERTa_large': 'roberta-large',
+            'BERT_base_multilingual_cased': 'bert-base-multilingual-cased',
+            'XLM_roberta_base': 'xlm-roberta-base',
+            'XLM_roberta_large': 'xlm-roberta-large',
+            'T5_small': 't5-small',
+            'T5_base': 't5-base',
+            'T5_large': 't5-large',
         }
         if self.embedding_type not in model_names:
             raise ValueError(f"Unknown embedding type: {self.embedding_type}")
@@ -182,18 +195,9 @@ class ModelSettings:
         try:
             # Handle transformer models
             if any(model_type in self.embedding_type
-                   for model_type in ['BERT', 'RoBERTa']):
+                   for model_type in ['BERT', 'XLM_roberta', 'T5']):
                 config = AutoConfig.from_pretrained(self._get_model_name())
                 return config.hidden_size
-
-            # Handle GloVe embeddings
-            elif 'glove' in self.embedding_type.lower():
-                try:
-                    return int(self.embedding_type.lower().split('_')[1].replace('d', ''))
-                except (IndexError, ValueError):
-                    raise ValueError(
-                        f"Invalid GloVe embedding format. Expected format: 'glove_<dim>d'"
-                    )
             else:
                 raise ValueError(
                     f"Unknown embedding type: {self.embedding_type}")
@@ -255,6 +259,42 @@ class ModelSettings:
         if self.fine_tune_reload_freq < 0:
             raise ValueError("fine_tune_reload_freq must be non-negative")
 
+    def _validate_fine_tune_settings(self):
+        """Validate fine-tuning settings based on selected mode"""
+        # Validate loading strategies
+        valid_strategies = ['periodic', 'adaptive', 'plateau', 'ensemble']
+        if not isinstance(self.fine_tune_loading_strategies, list):
+            raise ValueError("fine_tune_loading_strategies must be a list")
+        if not self.fine_tune_loading_strategies:
+            raise ValueError("At least one loading strategy must be specified")
+        if len(set(self.fine_tune_loading_strategies)) != len(self.fine_tune_loading_strategies):
+            raise ValueError("Duplicate loading strategies are not allowed")
+        if not all(strategy in valid_strategies for strategy in self.fine_tune_loading_strategies):
+            raise ValueError(
+                f"Invalid loading strategy. Must be from: {valid_strategies}")
+
+        # Validate strategy-specific parameters
+        if 'periodic' in self.fine_tune_loading_strategies:
+            if self.fine_tune_reload_freq < 0:
+                raise ValueError("fine_tune_reload_freq must be non-negative")
+
+        if 'adaptive' in self.fine_tune_loading_strategies:
+            if self.adaptive_base_freq <= 0:
+                raise ValueError("adaptive_base_freq must be positive")
+
+        if 'plateau' in self.fine_tune_loading_strategies:
+            if self.plateau_patience <= 0:
+                raise ValueError("plateau_patience must be positive")
+            if self.plateau_threshold <= 0:
+                raise ValueError("plateau_threshold must be positive")
+
+        if 'ensemble' in self.fine_tune_loading_strategies:
+            if self.ensemble_max_checkpoints < 2:
+                raise ValueError("ensemble_max_checkpoints must be at least 2")
+            if self.ensemble_min_improvement <= 0:
+                raise ValueError("ensemble_min_improvement must be positive")
+
+        # Validate fine-tuning mode settings
         if self.fine_tune_mode == 'none':
             if self.fine_tune_embedding:
                 raise ValueError(
@@ -303,25 +343,33 @@ class ModelSettings:
             raise ValueError("max_grad_norm must be positive")
 
     def get_activation(self) -> nn.Module:
-        """Return the appropriate activation function"""
-
-        activations = {
+        """Get activation function based on configuration"""
+        activation_map = {
             'relu': nn.ReLU(),
             'gelu': nn.GELU(),
             'tanh': nn.Tanh(),
             'sigmoid': nn.Sigmoid()
         }
-        return activations[self.activation]
+
+        if self.activation not in activation_map:
+            raise ValueError(
+                f"Unsupported activation function: {self.activation}")
+
+        return activation_map[self.activation]
 
     def get_final_activation(self) -> Optional[nn.Module]:
-        """Return the final activation function"""
-        if self.final_activation == 'none':
-            return None
-        activations = {
-            'softmax': nn.Softmax(dim=1),
-            'sigmoid': nn.Sigmoid()
+        """Get final activation function based on configuration"""
+        activation_map = {
+            'softmax': nn.Softmax(dim=-1),
+            'sigmoid': nn.Sigmoid(),
+            'linear': None
         }
-        return activations.get(self.final_activation)
+
+        if self.final_activation not in activation_map:
+            raise ValueError(
+                f"Unsupported final activation function: {self.final_activation}")
+
+        return activation_map[self.final_activation]
 
     def get_loss(self) -> nn.Module:
         """Return the appropriate loss function"""
@@ -392,15 +440,8 @@ class ModelSettings:
         if self.use_attention:
             errors = []
 
-            if self.attention_type == 'multi_head':
-                if self.num_attention_heads <= 0:
-                    errors.append("num_attention_heads must be positive")
-                if self.attention_dim % self.num_attention_heads != 0:
-                    errors.append(
-                        "attention_dim must be divisible by num_attention_heads")
-
-            if self.attention_dim <= 0:
-                errors.append("attention_dim must be positive")
+            if self.num_attention_heads <= 0:
+                errors.append("num_attention_heads must be positive")
 
             if not 0 <= self.attention_dropout <= 1:
                 errors.append("attention_dropout must be between 0 and 1")
@@ -418,7 +459,6 @@ class ModelSettings:
 
         return {
             'use_attention': True,
-            'type': self.attention_type,
             'dim': self.attention_dim,
             'num_heads': self.num_attention_heads,
             'dropout': self.attention_dropout,
@@ -495,8 +535,6 @@ class ModelSettings:
             class_weights=None,
             # Default attention settings
             use_attention=True,
-            attention_type='scaled_dot',
-            attention_dim=None,
             num_attention_heads=8,
             attention_dropout=0.1,
             attention_temperature=1.0,
@@ -538,8 +576,6 @@ class ModelSettings:
             # Additional settings for stability
             use_layer_norm=True,
             layer_norm_eps=1e-5,
-            use_attention=True,
-            attention_dropout=0.1,
             dropout_rate=0.1
         )
 
@@ -575,8 +611,6 @@ class ModelSettings:
             'class_weights': self.class_weights,
             # Attention settings
             'use_attention': self.use_attention,
-            'attention_type': self.attention_type,
-            'attention_dim': self.attention_dim,
             'num_attention_heads': self.num_attention_heads,
             'attention_dropout': self.attention_dropout,
             'attention_temperature': self.attention_temperature,
@@ -587,5 +621,13 @@ class ModelSettings:
             'use_layer_norm': self.use_layer_norm,
             'layer_norm_eps': self.layer_norm_eps,
             'layer_norm_elementwise': self.layer_norm_elementwise,
-            'layer_norm_affine': self.layer_norm_affine
+            'layer_norm_affine': self.layer_norm_affine,
+            # Loading strategy settings
+            'fine_tune_loading_strategies': self.fine_tune_loading_strategies,
+            'fine_tune_reload_freq': self.fine_tune_reload_freq,
+            'adaptive_base_freq': self.adaptive_base_freq,
+            'plateau_patience': self.plateau_patience,
+            'plateau_threshold': self.plateau_threshold,
+            'ensemble_max_checkpoints': self.ensemble_max_checkpoints,
+            'ensemble_min_improvement': self.ensemble_min_improvement
         }

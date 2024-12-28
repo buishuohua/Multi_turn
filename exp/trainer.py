@@ -116,10 +116,12 @@ class Trainer:
             all_params = self.model.parameters()
 
         # Initialize optimizer with parameter groups
-        self.optimizer = self.config.training_settings.get_optimizer(all_params)
+        self.optimizer = self.config.training_settings.get_optimizer(
+            all_params)
 
         # Initialize scheduler
-        self.scheduler = self.config.training_settings.get_scheduler(self.optimizer)
+        self.scheduler = self.config.training_settings.get_scheduler(
+            self.optimizer)
 
         # Initialize best validation loss
         self.best_val_loss = float('inf')
@@ -414,8 +416,6 @@ class Trainer:
             title_type = 'Latest'
         elif 'best' in save_dir:
             title_type = 'Best'
-        elif 'final' in save_dir:
-            title_type = 'Final'
         elif 'checkpoints' in save_dir:
             title_type = 'Checkpoint'
         else:
@@ -502,8 +502,6 @@ class Trainer:
             title_type = 'Latest'
         elif 'best' in save_dir:
             title_type = 'Best'
-        elif 'final' in save_dir:
-            title_type = 'Final'
         elif 'checkpoints' in save_dir:
             title_type = 'Checkpoint'
         else:
@@ -600,7 +598,7 @@ class Trainer:
         print(f"{'═' * 65}")  # Bottom border
 
     def train(self):
-        """Main training loop"""
+        """Main training loop with improved model loading"""
         # 1. Handle training continuation
         if self.continue_training:
             latest_checkpoint = self._find_latest_checkpoint()
@@ -620,7 +618,6 @@ class Trainer:
                 self.start_epoch = 0
         else:
             self.start_epoch = 0
-
 
         # 2. Main training loop
         for epoch in range(self.start_epoch, self.config.training_settings.num_epochs):
@@ -662,7 +659,7 @@ class Trainer:
                     epoch, is_best=False)  # This will save as latest
 
             self.save_checkpoint(epoch, val_metrics['loss'], is_best=is_best)
-            
+
             # Save periodic checkpoints
             if (epoch + 1) % self.config.training_settings.checkpoint_freq == 0:
                 # Save checkpoint figures
@@ -706,9 +703,6 @@ class Trainer:
             # Early stopping check
             if self.patience_counter >= self.config.training_settings.early_stopping_patience:
                 print(f"⚠️ Early stopping triggered after {epoch + 1} epochs")
-                # Save final state before breaking
-                self._save_final_state(
-                    train_labels, train_preds, val_labels, val_preds)
                 break
 
             # Learning rate scheduling
@@ -718,10 +712,37 @@ class Trainer:
             # Save whole period metrics
             self.save_whole_period_metrics()
 
-        # Save final state at end of training if not stopped early
-        if self.patience_counter < self.config.training_settings.early_stopping_patience:
-            self._save_final_state(
-                train_labels, train_preds, val_labels, val_preds)
+            # Handle model loading strategies
+            should_reload = False
+            load_type = 'best'
+
+            # Check periodic loading
+            if 'periodic' in self.config.model_settings.fine_tune_loading_strategies:
+                if (epoch + 1) % self.config.model_settings.fine_tune_reload_freq == 0:
+                    should_reload = True
+                    # Use latest model in later epochs
+                    load_type = 'latest' if epoch > self.config.training_settings.num_epochs // 2 else 'best'
+                    print(f"🔄 Periodic reload scheduled for epoch {epoch + 1}")
+
+            # Check plateau detection
+            if 'plateau' in self.config.model_settings.fine_tune_loading_strategies:
+                if len(self.val_losses) >= self.config.model_settings.plateau_patience:
+                    recent_losses = self.val_losses[-self.config.model_settings.plateau_patience:]
+                    if max(recent_losses) - min(recent_losses) < self.config.model_settings.plateau_threshold:
+                        should_reload = True
+                        load_type = 'best'  # Always use best model for plateau recovery
+                        print(f"📊 Plateau detected at epoch {epoch + 1}")
+
+            # Reload model if needed
+            if should_reload:
+                self.model._load_model_weights(
+                    self.model.embedding_model, load_type)
+                print(f"✅ Reloaded {load_type} model weights")
+
+            # Early stopping check
+            if self.patience_counter >= self.config.training_settings.early_stopping_patience:
+                print(f"⚠️ Early stopping triggered after {epoch + 1} epochs")
+                break
 
         return self.metrics_history
 
@@ -954,74 +975,88 @@ class Trainer:
         print("\n🔧 Model Configuration:")
         print(f"- Model Type: {self.config.model_selection.model_type}")
         print(f"- Embedding Type: {self.config.model_settings.embedding_type}")
-
-        # Print hidden dimensions based on configuration
+        print(f"- Architecture:")
         if self.config.model_settings.custom_hidden_dims is not None:
-            print(
-                f"- Hidden Dimensions: {self.config.model_settings.custom_hidden_dims}")
+            print(f"  • Hidden Dimensions: {self.config.model_settings.custom_hidden_dims}")
         else:
-            print(
-                f"- Initial Hidden Dim: {self.config.model_settings.init_hidden_dim}")
+            print(f"  • Initial Hidden Dim: {self.config.model_settings.init_hidden_dim}")
+        print(f"  • Number of Layers: {self.config.model_settings.num_layers}")
+        print(f"  • Bidirectional: {self.config.model_settings.bidirectional}")
+        print(f"  • Dropout Rate: {self.config.model_settings.dropout_rate}")
 
-        print(f"- Bidirectional: {self.config.model_settings.bidirectional}")
-        print(f"- Dropout Rate: {self.config.model_settings.dropout_rate}")
-        print(f"- Attention: {self.config.model_settings.use_attention}")
+        # Attention configuration
+        print("\n🎯 Attention Configuration:")
+        print(f"- Use Attention: {self.config.model_settings.use_attention}")
         if self.config.model_settings.use_attention:
-            print(f"  • Type: {self.config.model_settings.attention_type}")
-            print(
-                f"  • Heads: {self.config.model_settings.num_attention_heads}")
-            print(
-                f"  • Dimension: {self.config.model_settings.attention_dim}")
-            print(
-                f"  • Dropout: {self.config.model_settings.attention_dropout}")
-        print(
-            f"- Fine-tune Embedding: {self.config.model_settings.fine_tune_embedding}")
-        print(f"- Weight Init: {self.config.model_settings.weight_init}")
-        print(f"- Activation: {self.config.model_settings.activation}")
+            print(f"  • Number of Heads: {self.config.model_settings.num_attention_heads}")
+            print(f"  • Attention Positions: {self.config.model_settings.attention_positions}")
+            print(f"  • Attention Dropout: {self.config.model_settings.attention_dropout}")
+            print(f"  • Temperature: {self.config.model_settings.attention_temperature}")
+
+        # Architecture features
+        print("\n🏗️ Architecture Features:")
+        print(f"- Residual Connections: {self.config.model_settings.use_res_net}")
+        if self.config.model_settings.use_res_net:
+            print(f"  • Residual Dropout: {self.config.model_settings.res_dropout}")
+        print(f"- Layer Normalization: {self.config.model_settings.use_layer_norm}")
+        if self.config.model_settings.use_layer_norm:
+            print(f"  • Layer Norm Epsilon: {self.config.model_settings.layer_norm_eps}")
+            print(f"  • Elementwise: {self.config.model_settings.layer_norm_elementwise}")
+            print(f"  • Affine Transform: {self.config.model_settings.layer_norm_affine}")
+
+        # Fine-tuning configuration
+        print("\n🔄 Fine-tuning Configuration:")
+        print(f"- Fine-tune Embedding: {self.config.model_settings.fine_tune_embedding}")
+        if self.config.model_settings.fine_tune_embedding:
+            print(f"  • Mode: {self.config.model_settings.fine_tune_mode}")
+            print(f"  • Learning Rate: {self.config.model_settings.fine_tune_lr}")
+            print(f"  • Loading Strategies: {self.config.model_settings.fine_tune_loading_strategies}")
+            print(f"  • Reload Frequency: {self.config.model_settings.fine_tune_reload_freq}")
+            if 'plateau' in self.config.model_settings.fine_tune_loading_strategies:
+                print(f"  • Plateau Patience: {self.config.model_settings.plateau_patience}")
+                print(f"  • Plateau Threshold: {self.config.model_settings.plateau_threshold}")
+            if self.config.model_settings.use_discriminative_lr:
+                print(f"  • LR Decay Factor: {self.config.model_settings.lr_decay_factor}")
 
         # Training configuration
         print("\n⚙️ Training Configuration:")
         print(f"- Batch Size: {self.config.training_settings.batch_size}")
         print(f"- Max Length: {self.config.tokenizer_settings.max_length}")
-        print(
-            f"- Learning Rate: {self.config.training_settings.learning_rate}")
+        print(f"- Learning Rate: {self.config.training_settings.learning_rate}")
         print(f"- Weight Decay: {self.config.training_settings.weight_decay}")
         print(f"- Num Epochs: {self.config.training_settings.num_epochs}")
         print(f"- Loss Function: {self.config.model_settings.loss}")
+        if self.config.model_settings.loss == 'focal':
+            print(f"  • Focal Alpha: {self.config.model_settings.focal_alpha}")
+            print(f"  • Focal Gamma: {self.config.model_settings.focal_gamma}")
+        elif self.config.model_settings.loss == 'label_smoothing_ce':
+            print(f"  • Smoothing Factor: {self.config.model_settings.label_smoothing}")
         print(f"- Optimizer: {self.config.training_settings.optimizer_type}")
         if self.config.training_settings.gradient_clip:
-            print(
-                f"- Gradient Clipping: {self.config.training_settings.gradient_clip}")
-        print(
-            f"- Early Stopping Patience: {self.config.training_settings.early_stopping_patience}")
-        print(
-            f"- Scheduler Patience: {self.config.training_settings.scheduler_patience}")
-        print(
-            f"- Scheduler Factor: {self.config.training_settings.scheduler_factor}")
-        print(
-            f"- Min Learning Rate: {self.config.training_settings.min_learning_rate}")
-        print(
-            f"- Checkpoint Frequency: {self.config.training_settings.checkpoint_freq}")
+            print(f"- Gradient Clipping: {self.config.training_settings.gradient_clip}")
+        
+        # Early stopping and scheduler
+        print("\n📈 Training Control:")
+        print(f"- Early Stopping Patience: {self.config.training_settings.early_stopping_patience}")
+        print(f"- Scheduler Patience: {self.config.training_settings.scheduler_patience}")
+        print(f"- Scheduler Factor: {self.config.training_settings.scheduler_factor}")
+        print(f"- Min Learning Rate: {self.config.training_settings.min_learning_rate}")
+        print(f"- Checkpoint Frequency: {self.config.training_settings.checkpoint_freq}")
 
         # Data configuration
         print("\n📊 Data Configuration:")
-        print(
-            f"- Imbalanced Strategy: {self.config.data_settings.imbalanced_strategy}")
+        print(f"- Task Type: {self.config.training_settings.task_type}")
+        print(f"- Imbalanced Strategy: {self.config.data_settings.imbalanced_strategy}")
         if self.config.data_settings.imbalanced_strategy == 'weighted_sampler':
-            print(
-                f"  • Alpha: {self.config.data_settings.weighted_sampler_alpha}")
-        print(
-            f"- Number of Classes: {len(self.config.data_settings.class_names)}")
+            print(f"  • Alpha: {self.config.data_settings.weighted_sampler_alpha}")
+        print(f"- Number of Classes: {len(self.config.data_settings.class_names)}")
 
-        # Directory configuration
-        print("\n📂 Directory Configuration:")
-        print(
-            f"- Model Save Dir: {self.config.training_settings.save_model_dir}")
-        print(
-            f"- Results Save Dir: {self.config.training_settings.save_results_dir}")
-        if self.config.model_settings.fine_tune_embedding:
-            print(
-                f"- Fine-tuned Models Dir: {self.config.training_settings.fine_tuned_models_dir}")
+        # Dataset information
+        print("\n📚 Dataset Information:")
+        print(f"- Training samples: {len(self.train_loader.dataset)}")
+        print(f"- Validation samples: {len(self.val_loader.dataset)}")
+        print(f"- Test samples: {len(self.test_loader.dataset)}")
+        print(f"- Number of batches (train): {len(self.train_loader)}")
 
         # Hardware configuration
         print("\n💻 Hardware Configuration:")
@@ -1030,25 +1065,6 @@ class Trainer:
         print(f"- CUDA available: {torch.cuda.is_available()}")
         if torch.cuda.is_available():
             print(f"- CUDA devices: {torch.cuda.device_count()}")
-
-        # Dataset information
-        print("\n Dataset Information:")
-        print(f"- Training samples: {len(self.train_loader.dataset)}")
-        print(f"- Validation samples: {len(self.val_loader.dataset)}")
-        print(f"- Test samples: {len(self.test_loader.dataset)}")
-        print(f"- Number of batches (train): {len(self.train_loader)}")
-
-        # Add fine-tuning information
-        if self.config.model_settings.fine_tune_embedding:
-            print("\n🔄 Fine-tuning Configuration:")
-            print(f"- Mode: {self.config.model_settings.fine_tune_mode}")
-            print(f"- Fine-tuned Models Dir: {self.fine_tuned_dir}")
-            if self.config.model_settings.use_discriminative_lr:
-                print(
-                    f"- Discriminative LR Decay: {self.config.model_settings.lr_decay_factor}")
-            if hasattr(self.config.model_settings, 'fine_tune_lr'):
-                print(
-                    f"- Fine-tuning Learning Rate: {self.config.model_settings.fine_tune_lr}")
 
         print("\n" + "="*50 + "\n")
 
@@ -1555,14 +1571,13 @@ class Trainer:
             epoch: Current epoch number
             train_metrics: Dictionary containing training metrics
             val_metrics: Dictionary containing validation metrics
-            save_type: 'latest', 'best', 'checkpoint', or 'final'
+            save_type: 'latest', 'best', 'checkpoint'
         """
         # Define icons for different save types
         icons = {
             'latest': '💾',     # Floppy disk for latest
             'best': '🏆',       # Trophy for best
-            'checkpoint': '📁',  # Folder for checkpoints
-            'final': '🔚'       # End arrow for final
+            'checkpoint': '📁'  # Folder for checkpoints
         }
         # Default icon if save type not found
         icon = icons.get(save_type, '📊')
@@ -1612,9 +1627,6 @@ class Trainer:
         elif save_type == 'checkpoint':
             metrics_dir = os.path.join(
                 self.metrics_dir, 'checkpoints', f'epoch_{epoch + 1}')
-        elif save_type == 'final':
-            metrics_dir = os.path.join(self.metrics_dir, 'final')
-
         # Ensure directory exists using class method
         self._ensure_dir_exists(metrics_dir)
 

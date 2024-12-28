@@ -36,6 +36,18 @@ class BERTs:
         model=AutoModel.from_pretrained("bert-base-multilingual-cased")
     )
 
+    XLM_roberta_base = Tokenizer(
+        name="XLM_roberta_base",
+        tokenizer=AutoTokenizer.from_pretrained("xlm-roberta-base"),
+        model=AutoModel.from_pretrained("xlm-roberta-base")
+    )
+    
+    XLM_roberta_large = Tokenizer(
+        name="XLM_roberta_large",
+        tokenizer=AutoTokenizer.from_pretrained("xlm-roberta-large"),
+        model=AutoModel.from_pretrained("xlm-roberta-large")
+    )
+
     @classmethod
     def get_tokenizer(cls, name: str) -> Tokenizer:
         return getattr(cls, name)

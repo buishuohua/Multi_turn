@@ -16,9 +16,12 @@ def create_experiment_name(config, is_model=True):
     emb_map = {
         'BERT_base_uncased': 'BB',
         'BERT_large_uncased': 'BL',
-        'RoBERTa_base': 'RB',
-        'glove_100d': 'G1',
-        'glove_300d': 'G3'
+        'BERT_base_multilingual_cased': 'BM',
+        'XLM_roberta_base': 'XB',
+        'XLM_roberta_large': 'XL',
+        'T5_small': 'TS',
+        'T5_base': 'TB',
+        'T5_large': 'TL',
     }
     components.append(emb_map[config.model_settings.embedding_type])
 
@@ -84,7 +87,29 @@ def create_experiment_name(config, is_model=True):
     if config.data_settings.imbalanced_strategy != 'none':
         components.append(imb_map[config.data_settings.imbalanced_strategy])
 
-    # 6. Key Features as Flags (e.g., "ARTG")
+    # NEW: 6. Attention Position (e.g., "ATN-EIO")
+    if config.model_settings.use_attention:
+        pos_map = {
+            'embedding': 'E',
+            'inter_lstm': 'I',
+            'output': 'O'
+        }
+        pos_str = ''.join(pos_map[pos] for pos in sorted(
+            config.model_settings.attention_positions))
+        components.append(f"ATN-{pos_str}")
+
+    # NEW: 7. Loading Strategy (e.g., "LD-PL20")
+    if config.model_settings.fine_tune_embedding:
+        strategy_map = {
+            'periodic': 'P',
+            'plateau': 'L',
+        }
+        strategy_str = ''.join(strategy_map[s] for s in sorted(
+            config.model_settings.fine_tune_loading_strategies))
+        reload_freq = f"{config.model_settings.fine_tune_reload_freq}"
+        components.append(f"LD-{strategy_str}{reload_freq}")
+
+    # 8. Key Features as Flags (e.g., "ARTG")
     features = []
     if config.model_settings.use_attention:
         features.append('A')  # Attention

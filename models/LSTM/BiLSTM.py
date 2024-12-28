@@ -35,6 +35,9 @@ class BiLSTM(BaseLSTM):
         super().__init__(config)
         self.dropout = nn.Dropout(config.model_settings.dropout_rate)
 
+        # Create attention modules
+        self.attention_modules = self._create_attention()
+
         # Ensure hidden_dims is properly initialized
         if not hasattr(self.config.model_settings, 'hidden_dims') or not self.config.model_settings.hidden_dims:
             raise ValueError(
@@ -64,15 +67,20 @@ class BiLSTM(BaseLSTM):
 
             self.layer_norms = nn.ModuleDict(lstm_layer_norms)
 
-    def forward(self, x, attention_mask=None):
+    def forward(self, x):
         # Get embeddings
         # [batch_size, seq_len, embedding_dim]
         embedded = self.embedding_model(x).last_hidden_state
 
+        # Apply attention after embedding
+        if self.attention_modules.get('embedding'):
+            embedded = self.apply_attention(
+                embedded, self.attention_modules['embedding'])
+
         # Initialize hidden states
         hidden_states = self.init_hidden(x.size(0))
 
-        # Process through LSTM layers with residual connections
+        # Process through LSTM layers with attention
         lstm_out = embedded
         for i, lstm_layer in enumerate(self.lstm):
             # Store residual
@@ -80,6 +88,11 @@ class BiLSTM(BaseLSTM):
 
             # LSTM forward pass
             lstm_out, (h, c) = lstm_layer(lstm_out, hidden_states[i])
+
+            # Apply attention between LSTM layers
+            if i < len(self.lstm) - 1 and self.attention_modules.get('inter_lstm'):
+                lstm_out = self.apply_attention(lstm_out,
+                                                self.attention_modules['inter_lstm'][i])
 
             # Apply residual connection if enabled
             if self.config.model_settings.use_res_net:
@@ -92,12 +105,23 @@ class BiLSTM(BaseLSTM):
             if self.layer_norms is not None:
                 lstm_out = self.layer_norms[f'lstm_{i}'](lstm_out)
 
-        # Get final hidden state (concatenate forward and backward if bidirectional)
-        if self.config.model_settings.bidirectional:
-            hidden = torch.cat((lstm_out[:, -1, :self.config.model_settings.hidden_dims[-1]],
-                                lstm_out[:, 0, self.config.model_settings.hidden_dims[-1]:]), dim=1)
-        else:
-            hidden = lstm_out[:, -1, :]
+        # Get final hidden state based on pooling style
+        if self.config.model_settings.pooling == 'mean':
+            # Mean pooling over sequence length
+            hidden = lstm_out.mean(dim=1)
+        else:  # 'last' pooling (default)
+            if self.config.model_settings.bidirectional:
+                # Concatenate forward (last timestep) and backward (first timestep) hidden states
+                hidden = torch.cat((lstm_out[:, -1, :self.config.model_settings.hidden_dims[-1]],
+                                    lstm_out[:, 0, self.config.model_settings.hidden_dims[-1]:]), dim=1)
+            else:
+                # Use last timestep for unidirectional LSTM
+                hidden = lstm_out[:, -1, :]
+
+        # Apply attention after final LSTM
+        if self.attention_modules.get('output'):
+            hidden = self.apply_attention(hidden.unsqueeze(1),
+                                          self.attention_modules['output']).squeeze(1)
 
         # Apply final layer norm if enabled
         if self.layer_norms is not None:
