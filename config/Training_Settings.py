@@ -148,20 +148,24 @@ class TrainingSettings:
         def state_dict(self):
             """Returns the state of the scheduler as a :class:`dict`"""
             return {
-                'current_step': self.current_step,
+                'step_count': self.step_count,
                 'initial_lrs': self.initial_lrs,
                 'warmup_steps': self.warmup_steps,
                 'decay_factors': self.decay_factors,
-                'min_lrs': self.min_lrs
+                'min_lrs': self.min_lrs,
+                'best_val_loss': self.best_val_loss,
+                'plateau_count': self.plateau_count
             }
 
         def load_state_dict(self, state_dict):
             """Loads the scheduler state"""
-            self.current_step = state_dict['current_step']
+            self.step_count = state_dict['step_count']
             self.initial_lrs = state_dict['initial_lrs']
             self.warmup_steps = state_dict['warmup_steps']
             self.decay_factors = state_dict['decay_factors']
             self.min_lrs = state_dict['min_lrs']
+            self.best_val_loss = state_dict['best_val_loss']
+            self.plateau_count = state_dict['plateau_count']
 
     def __post_init__(self):
         """Validate settings after initialization and auto-detect continue_training"""
