@@ -112,7 +112,7 @@ class ModelSettings:
 
     # Fine-tuning loading strategies
     fine_tune_loading_strategies: List[str] = field(
-        default_factory=lambda: ['periodic', 'adaptive', 'plateau', 'ensemble']
+        default_factory=lambda: ['adaptive', 'plateau', 'ensemble']
     )
     fine_tune_reload_freq: int = 20  # For periodic loading
     adaptive_base_freq: int = 10      # For adaptive loading
@@ -533,13 +533,14 @@ class ModelSettings:
             })
 
         return config
+
     def get_layers_to_unfreeze_at_epoch(self, epoch: int) -> List[int]:
         """
         Determine which layers should be unfrozen at the current epoch.
-        
+
         Args:
             epoch (int): Current training epoch
-            
+
         Returns:
             List[int]: List of layer indices to unfreeze
         """
@@ -566,7 +567,7 @@ class ModelSettings:
         else:
             layers_to_unfreeze = []
 
-        print(f"\n🔄 Gradual unfreezing at epoch {epoch}:")
+        print(f"\n🔄 Gradual unfreezing at epoch {epoch + 1}:")
         print(f"  • Total layers to unfreeze: {total_layers_to_unfreeze}")
         print(f"  • Layers being unfrozen: {layers_to_unfreeze}")
 
@@ -591,7 +592,6 @@ class ModelSettings:
         lr_multiplier = self.lr_decay_factor ** (1 - layer_position)
 
         return self.fine_tune_lr * lr_multiplier
-    
 
     @classmethod
     def get_default(cls):

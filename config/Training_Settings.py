@@ -331,22 +331,22 @@ class TrainingSettings:
             scheduler_type='multi_group',
             scheduler_groups={
                 'embedding': {
-                    'initial_lr': 5e-5,
-                    'warmup_steps': 1000,
+                    'initial_lr': 2e-5,
+                    'warmup_steps': 2000,
                     'decay_factor': 0.95,
                     'min_lr': 1e-6
                 },
                 'attention': {
-                    'initial_lr': 1e-4,
-                    'warmup_steps': 500,
+                    'initial_lr': 3e-5,
+                    'warmup_steps': 1000,
                     'decay_factor': 0.9,
                     'min_lr': 1e-6
                 },
                 'other': {
-                    'initial_lr': 1e-3,
-                    'warmup_steps': 200,
+                    'initial_lr': 5e-5,
+                    'warmup_steps': 500,
                     'decay_factor': 0.85,
-                    'min_lr': 1e-7
+                    'min_lr': 1e-6
                 }
             }
         )

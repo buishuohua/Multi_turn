@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 import time
 from utils.experiment_utils import create_experiment_name
+from collections import Counter
 import torch.nn as nn
 if TYPE_CHECKING:
     from config.Experiment_Config import ExperimentConfig
@@ -74,9 +75,6 @@ class Trainer:
 
         # Create full experiment name
         self.experiment_name = create_experiment_name(config, is_model=False)
-
-        # Update model's experiment name to match trainer's
-        self.model.experiment_name = self.experiment_name
 
         # Create directories
         self._setup_directories()
@@ -207,6 +205,7 @@ class Trainer:
         self.metrics_history = []
         self.best_val_loss = float('inf')
         self.patience_counter = 0
+        self.early_stopped = False
         self.continue_training = self.config.training_settings.continue_training
 
     def _setup_directories(self):
@@ -308,7 +307,7 @@ class Trainer:
                         f"✅ Successfully loaded corresponding fine-tuned embedding from: {embedding_path}")
 
             print(
-                f"✅ Successfully loaded checkpoint from epoch {checkpoint['epoch'] + 1}")
+                f"✅ Successfully loaded checkpoint from epoch {checkpoint['epoch']}")
             return checkpoint
 
         except Exception as e:
@@ -352,29 +351,6 @@ class Trainer:
             current_mode = os.stat(path).st_mode
             os.chmod(path, current_mode | 0o777)
 
-    def _create_epoch_directories(self, epoch):
-        """Create epoch-specific directories for checkpoints, figures, and metrics"""
-        epoch_str = f"epoch_{epoch}"
-
-        # Create main epoch directories
-        epoch_model_dir = os.path.join(
-            self.model_dir, 'checkpoints', epoch_str)
-        epoch_figures_dir = os.path.join(
-            self.results_dir, 'figures', epoch_str)
-        epoch_metrics_dir = os.path.join(
-            self.results_dir, 'metrics', epoch_str)
-
-        # Create fine-tuned model directory if needed
-        if self.config.model_settings.fine_tune_embedding:
-            epoch_fine_tuned_dir = os.path.join(
-                self.fine_tuned_dir, 'checkpoints', epoch_str)
-            self._ensure_dir_exists(epoch_fine_tuned_dir)
-
-        for directory in [epoch_model_dir, epoch_figures_dir, epoch_metrics_dir]:
-            self._ensure_dir_exists(directory)
-
-        return epoch_model_dir, epoch_figures_dir, epoch_metrics_dir
-
     def save_checkpoint(self, epoch, val_loss, is_best=False):
         """Save model checkpoint with training history"""
         checkpoint = {
@@ -385,19 +361,21 @@ class Trainer:
             'val_loss': val_loss,
             'train_losses': self.train_losses,
             'val_losses': self.val_losses,
-            'metrics_history': self.metrics_history
+            'metrics_history': self.metrics_history,
+            'early_stopped': self.early_stopped,
+            'patience_counter': self.patience_counter,
         }
 
         # Always save latest
         latest_path = os.path.join(self.model_dir, 'latest', 'model_latest.pt')
         torch.save(checkpoint, latest_path)
-        print(f"💾 Saved latest model at epoch {epoch + 1}")
+        print(f"💾 Saved latest model at epoch {epoch}")
 
         # Save best if needed
         if is_best:
             best_path = os.path.join(self.model_dir, 'best', 'model_best.pt')
             torch.save(checkpoint, best_path)
-            print(f"🏆 Saved best model at epoch {epoch + 1}")
+            print(f"🏆 Saved best model at epoch {epoch}")
 
         # Save periodic checkpoint if needed
         if (epoch + 1) % self.config.training_settings.checkpoint_freq == 0:
@@ -407,7 +385,7 @@ class Trainer:
                 f'checkpoint_epoch_{epoch + 1}.pt'
             )
             torch.save(checkpoint, checkpoint_path)
-            print(f"📁 Saved checkpoint model at epoch {epoch + 1}")
+            print(f"📁 Saved checkpoint model at epoch {epoch}")
 
     def _save_figure_safely(self, save_path, fig=None, **save_kwargs):
         """Safely save a matplotlib figure with error handling and cleanup
@@ -688,7 +666,12 @@ class Trainer:
                 if checkpoint is not None:
                     self.start_epoch = checkpoint['epoch'] + 1
                     # Update model's current epoch
-                    self.model.update_epoch(self.start_epoch)
+                    self.model.update_epoch(self.start_epoch, self.start_epoch)
+
+                    if self.early_stopped:
+                        print(
+                            "⚠️ Model had previously early-stopped")
+                        return self.metrics_history
                     print(
                         f"✅ Resuming training from epoch {self.start_epoch + 1}")
                 else:
@@ -702,13 +685,17 @@ class Trainer:
 
         # 2. Main training loop
         for epoch in range(self.start_epoch, self.config.training_settings.num_epochs):
+
             # Update current epoch in model before training
-            self.model.update_epoch(epoch)
+            self.model.update_epoch(epoch, self.start_epoch)
 
             print(f"\n{'─'*50}")
             print(
                 f"⏳ Epoch {epoch + 1}/{self.config.training_settings.num_epochs}")
             print(f"{'─'*50}")
+
+            new_embedding_model = self.model._load_or_create_embedding_model()
+            self.model.embedding_model = new_embedding_model  # Update the model's embedding
 
             # Log current learning rates before training
             self._log_learning_rates(epoch)
@@ -723,7 +710,6 @@ class Trainer:
             # Update metrics history
             self._update_tracking(train_metrics, val_metrics)
 
-
             # Save latest figures and metrics
             latest_dir = os.path.join(self.figures_dir, 'latest')
             self._ensure_dir_exists(latest_dir)
@@ -732,7 +718,7 @@ class Trainer:
             self._save_epoch_figures(
                 None, None, val_labels, val_preds, latest_dir, phase='val')
             self._save_metrics_data(
-                epoch, train_metrics, val_metrics, save_type='latest')
+                epoch + 1, train_metrics, val_metrics, save_type='latest')
 
             current_val_loss = val_metrics['loss']
             is_best = current_val_loss < self.best_val_loss
@@ -746,16 +732,15 @@ class Trainer:
 
             # Track learning rates
             self._update_lr_history()
-            
+
             # Add this: Save latest fine-tuned embedding if enabled
             if self.config.model_settings.fine_tune_embedding:
                 self._save_fine_tuned_embedding(
                     epoch, is_best=False)  # This will save as latest
                 self.model.save_checkpoint(current_val_loss)
-                self.model._load_or_create_embedding_model()
                 self.model.update_gradual_unfreezing(epoch)
 
-            self.save_checkpoint(epoch, val_metrics['loss'], is_best=is_best)
+            self.save_checkpoint(epoch + 1, val_metrics['loss'], is_best=is_best)
 
             # Save periodic checkpoints
             if (epoch + 1) % self.config.training_settings.checkpoint_freq == 0:
@@ -769,14 +754,13 @@ class Trainer:
                     None, None, val_labels, val_preds, checkpoint_figures_dir, phase='val')
                 # Save checkpoint metrics
                 self._save_metrics_data(
-                    epoch, train_metrics, val_metrics, save_type='checkpoint')
+                    epoch + 1, train_metrics, val_metrics, save_type='checkpoint')
 
                 # Save model checkpoint
                 checkpoint_dir = os.path.join(self.model_dir, 'checkpoints')
                 self._ensure_dir_exists(checkpoint_dir)
 
             # Check if this is the best model
-
             if is_best:
                 self.best_val_loss = current_val_loss
                 self.patience_counter = 0
@@ -791,18 +775,13 @@ class Trainer:
 
                 # Save best metrics
                 self._save_metrics_data(
-                    epoch, train_metrics, val_metrics, save_type='best')
+                    epoch + 1, train_metrics, val_metrics, save_type='best')
 
                 # Save best fine-tuned embedding if enabled
                 if self.config.model_settings.fine_tune_embedding:
                     self._save_fine_tuned_embedding(epoch, is_best=True)
             else:
                 self.patience_counter += 1
-
-            # Early stopping check
-            if self.patience_counter >= self.config.training_settings.early_stopping_patience:
-                print(f"⚠️ Early stopping triggered after {epoch + 1} epochs")
-                break
 
             # Learning rate scheduling
             if self.scheduler is not None:
@@ -814,6 +793,7 @@ class Trainer:
             # Early stopping check
             if self.patience_counter >= self.config.training_settings.early_stopping_patience:
                 print(f"⚠️ Early stopping triggered after {epoch + 1} epochs")
+                self.early_stopped = True
                 break
 
         return self.metrics_history
@@ -922,7 +902,7 @@ class Trainer:
 
         return metrics, train_preds, train_labels
 
-    def evaluate(self, loader, phase='val'):
+    def evaluate(self, loader, phase='test'):
         """Validate or test the model"""
         self.model.eval()
 
@@ -932,16 +912,59 @@ class Trainer:
             best_model_path = os.path.join(
                 self.model_dir, 'best', 'model_best.pt')
             if os.path.exists(best_model_path):
+                # Load entire checkpoint to get full state
                 checkpoint = torch.load(best_model_path, weights_only=True)
-                self.model.load_state_dict(checkpoint['model_state_dict'])
-                print(f"✅ Loaded best model for testing")
-            else:
-                print(f"⚠️ No best model found for testing")
+                best_model_epoch = checkpoint.get('epoch', 'unknown')
 
-        # Handle fine-tuned embedding loading based on phase
-        if self.config.model_settings.fine_tune_embedding:
-            if phase == 'val':
-                # For validation, use latest fine-tuned model
+                # Load model state
+                self.model.load_state_dict(checkpoint['model_state_dict'])
+
+                # Optionally load optimizer and scheduler states if needed
+                if 'optimizer_state_dict' in checkpoint:
+                    self.optimizer.load_state_dict(
+                        checkpoint['optimizer_state_dict'])
+                if hasattr(self, 'scheduler') and self.scheduler and 'scheduler_state_dict' in checkpoint:
+                    self.scheduler.load_state_dict(
+                        checkpoint['scheduler_state_dict'])
+
+                print(f"✅ Loaded best model from epoch {best_model_epoch}")
+
+                # Load corresponding embedding model from the same epoch
+                if self.config.model_settings.fine_tune_embedding:
+
+                    embedding_path = os.path.join(
+                        self.config.training_settings.fine_tuned_models_dir,
+                        self.config.training_settings.task_type,
+                        self.config.data_settings.which,
+                        self.config.model_settings.embedding_type,
+                        self.experiment_name,
+                        'best',
+                        'embedding_model_best.pt'
+                    )
+
+                    if os.path.exists(embedding_path):
+                        embedding_checkpoint = torch.load(
+                            embedding_path, weights_only=True)
+                        self.model.embedding_model.load_state_dict(
+                            embedding_checkpoint['state_dict'])
+                        embedding_epoch = embedding_checkpoint.get(
+                            'epoch', 'unknown')
+                        print(
+                            f"✅ Loaded embedding model from epoch {embedding_epoch}")
+
+                        if embedding_epoch != best_model_epoch:
+                            print(
+                                f"⚠️ Warning: Embedding model epoch ({embedding_epoch}) differs from best model epoch ({best_model_epoch})")
+                    else:
+                        print("❌ No embedding model found for evaluation")
+                        return None
+            else:
+                print(f"⚠️ No best model found at {best_model_path}")
+                return None
+
+        # For validation phase, use latest models
+        elif phase == 'val':
+            if self.config.model_settings.fine_tune_embedding:
                 embedding_path = os.path.join(
                     self.config.training_settings.fine_tuned_models_dir,
                     self.config.training_settings.task_type,
@@ -951,30 +974,14 @@ class Trainer:
                     'latest',
                     'embedding_model_latest.pt'
                 )
-                model_version = 'latest'
-            else:  # phase == 'test'
-                # For testing, use best fine-tuned model
-                embedding_path = os.path.join(
-                    self.config.training_settings.fine_tuned_models_dir,
-                    self.config.training_settings.task_type,
-                    self.config.data_settings.which,
-                    self.config.model_settings.embedding_type,
-                    self.experiment_name,
-                    'best',
-                    'embedding_model_best.pt'
-                )
-                model_version = 'best'
-
-            if os.path.exists(embedding_path):
-                embedding_checkpoint = torch.load(
-                    embedding_path, weights_only=True)
-                self.model.embedding_model.load_state_dict(
-                    embedding_checkpoint['state_dict'])
-                print(
-                    f"✅ Loaded {model_version} fine-tuned embedding for {phase} evaluation")
-            else:
-                print(
-                    f"⚠️ No {model_version} fine-tuned model found for {phase} evaluation")
+                if os.path.exists(embedding_path):
+                    embedding_checkpoint = torch.load(
+                        embedding_path, weights_only=True)
+                    self.model.embedding_model.load_state_dict(
+                        embedding_checkpoint['state_dict'])
+                    print(f"✅ Loaded latest fine-tuned embedding for validation")
+                else:
+                    print("⚠️ No latest fine-tuned model found for validation")
 
         total_loss = 0
         num_samples = 0
@@ -1007,6 +1014,35 @@ class Trainer:
 
         # Calculate and print metrics
         self._print_metrics(phase, metrics, len(self.metrics_history))
+
+        # For test phase, create and save additional visualizations
+        if phase == 'test':
+            test_results_dir = os.path.join(self.results_dir, 'test_results')
+            self._ensure_dir_exists(test_results_dir)
+
+            # Plot confusion matrix
+            try:
+                self.plot_confusion_matrix(
+                    all_labels,
+                    all_preds,
+                    test_results_dir,
+                    prefix='test'
+                )
+                print("✅ Saved test confusion matrix")
+            except Exception as e:
+                print(f"❌ Error saving confusion matrix: {str(e)}")
+
+            # Plot per-class performance
+            try:
+                self.plot_class_performance(
+                    all_labels,
+                    all_preds,
+                    test_results_dir,
+                    prefix='test'
+                )
+                print("✅ Saved test class performance plot")
+            except Exception as e:
+                print(f"❌ Error saving class performance plot: {str(e)}")
 
         return metrics, all_labels, all_preds
 
@@ -1445,14 +1481,15 @@ class Trainer:
             save_dir = os.path.join(base_dir, 'best')
             file_name = 'embedding_model_best.pt'
             save_type = 'best'
-        elif (epoch + 1) % self.config.training_settings.checkpoint_freq == 0:
-            save_dir = os.path.join(base_dir, 'checkpoints')
-            file_name = f'embedding_model_epoch_{epoch + 1}.pt'
-            save_type = 'checkpoint'
         else:
             save_dir = os.path.join(base_dir, 'latest')
             file_name = 'embedding_model_latest.pt'
             save_type = 'latest'
+
+        if (epoch + 1) % self.config.training_settings.checkpoint_freq == 0:
+            save_dir = os.path.join(base_dir, 'checkpoints')
+            file_name = f'embedding_model_epoch_{epoch + 1}.pt'
+            save_type = 'checkpoint'
 
         # Create save key to track unique saves
         save_key = f"{save_type}_{epoch + 1}"
@@ -1469,18 +1506,22 @@ class Trainer:
                     'mode': self.config.model_settings.fine_tune_mode,
                     'unfrozen_layers': [name for name, param in self.model.embedding_model.named_parameters()
                                         if param.requires_grad],
-                    'lr_scales': {name: getattr(param, 'lr_scale', 1.0)
-                                  for name, param in self.model.embedding_model.named_parameters()}
                 }
             }
+            icons = {'best': '🏆', 'checkpoint': '📁', 'latest': '💾'}
+            icon = icons[save_type]
 
-            torch.save(state_dict, save_path)
-
-            # Print save message with appropriate icon
-            icon = '🏆' if is_best else (
-                '📁' if save_type == 'checkpoint' else '💾')
-            print(
-                f"{icon} Saved {save_type} fine-tuned embedding at epoch {epoch + 1}")
+            # Verify state before saving
+            try:
+                torch.save(state_dict, save_path)
+                # Verify loading
+                test_load = torch.load(
+                    save_path, map_location='cpu', weights_only=False)
+                assert test_load['epoch'] == epoch + 1
+                print(
+                    f"{icon} Verified and saved {save_type} fine-tuned embedding at epoch {epoch + 1}")
+            except Exception as e:
+                print(f"❌ Error saving embedding model: {str(e)}")
 
             # Mark this save as completed
             setattr(self, f'_last_embedding_save_{save_key}', True)
@@ -1728,7 +1769,7 @@ class Trainer:
             metrics_dir = os.path.join(self.metrics_dir, 'best')
         elif save_type == 'checkpoint':
             metrics_dir = os.path.join(
-                self.metrics_dir, 'checkpoints', f'epoch_{epoch + 1}')
+                self.metrics_dir, 'checkpoints', f'epoch_{epoch}')
         # Ensure directory exists using class method
         self._ensure_dir_exists(metrics_dir)
 
@@ -1739,7 +1780,7 @@ class Trainer:
         with open(metrics_path, 'w') as f:
             json.dump(metrics_data, f, indent=4)
 
-        print(f"{icon} Saved {save_type} metrics at epoch {epoch + 1}")
+        print(f"{icon} Saved {save_type} metrics at epoch {epoch}")
 
     def _log_learning_rates(self, epoch):
         """Log current learning rates for each parameter group"""
@@ -1757,3 +1798,187 @@ class Trainer:
                           'attention' if idx == 1 else
                           'other')
             self.lr_history[group_type].append(group['lr'])
+
+    def analyze_misclassified_samples(self, all_labels, all_preds, loader, test_results_dir, n_samples=5):
+        """Analyze misclassified samples for worst performing classes"""
+        try:
+            misclassified = np.where(
+                np.array(all_labels) != np.array(all_preds))[0]
+            class_names = self.config.data_settings.class_names
+
+            analysis_dir = os.path.join(
+                test_results_dir, 'misclassified_analysis')
+            self._ensure_dir_exists(analysis_dir)
+
+            class_errors = {class_name: [] for class_name in class_names}
+
+            # Get original data from dataset
+            dataset = loader.dataset
+
+            for idx in misclassified:
+                true_class = class_names[all_labels[idx]]
+                pred_class = class_names[all_preds[idx]]
+
+                # Get original text and metadata
+                original_data = dataset.get_original_data(idx)
+
+                class_errors[true_class].append({
+                    'predicted': pred_class,
+                    'original_text': original_data['text'],
+                    'index': idx
+                })
+
+            # Save analysis results
+            analysis_path = os.path.join(
+                analysis_dir, 'misclassified_samples.txt')
+            with open(analysis_path, 'w', encoding='utf-8') as f:
+                f.write("=== Misclassified Samples Analysis ===\n\n")
+
+                for class_name, errors in class_errors.items():
+                    if errors:
+                        f.write(f"\nClass: {class_name}\n")
+                        f.write(f"Total misclassified: {len(errors)}\n")
+                        f.write("Sample errors:\n")
+
+                        for i, error in enumerate(errors[:n_samples]):
+                            f.write(f"\nSample {i+1}:\n")
+                            f.write(f"  Predicted as: {error['predicted']}\n")
+                            f.write(
+                                f"  Original text: {error['original_text']}\n")
+                            f.write(f"  Dataset index: {error['index']}\n")
+                            f.write("-" * 50 + "\n")
+
+            print(
+                f"\n✅ Saved misclassified samples analysis to {analysis_path}")
+
+        except Exception as e:
+            print(f"❌ Error in misclassified samples analysis: {str(e)}")
+
+    def analyze_class_performance(self, metrics, all_labels, all_preds, test_results_dir, n_classes=5):
+        """Analyze best and worst performing classes across different metrics"""
+        try:
+            metrics_dict = {
+                'Precision': metrics['precision_per_class'],
+                'Recall': metrics['recall_per_class'],
+                'F1': metrics['f1_per_class']
+            }
+
+            class_names = self.config.data_settings.class_names
+            analysis_results = {}
+
+            print("\n=== Class Performance Analysis ===")
+
+            # Calculate class distribution
+            class_counts = Counter(all_labels)
+            total_samples = len(all_labels)
+
+            # Calculate confusion statistics per class
+            confusion_stats = {}
+            for true_label in range(len(class_names)):
+                true_mask = (np.array(all_labels) == true_label)
+                pred_mask = (np.array(all_preds) == true_label)
+
+                tp = np.sum(true_mask & pred_mask)
+                fp = np.sum(~true_mask & pred_mask)
+                fn = np.sum(true_mask & ~pred_mask)
+
+                confusion_stats[class_names[true_label]] = {
+                    'total_samples': int(np.sum(true_mask)),
+                    'correct_predictions': int(tp),
+                    'false_positives': int(fp),
+                    'false_negatives': int(fn),
+                    'distribution': f"{(np.sum(true_mask)/total_samples)*100:.2f}%"
+                }
+
+            # Analyze each metric
+            for metric_name, metric_values in metrics_dict.items():
+                metric_array = np.array(metric_values)
+
+                # Get top and bottom classes
+                top_indices = np.argsort(metric_array)[-n_classes:][::-1]
+                bottom_indices = np.argsort(metric_array)[:n_classes]
+
+                # Store results with additional statistics
+                analysis_results[metric_name] = {
+                    'top': [(class_names[i], metric_array[i], confusion_stats[class_names[i]])
+                            for i in top_indices],
+                    'bottom': [(class_names[i], metric_array[i], confusion_stats[class_names[i]])
+                               for i in bottom_indices]
+                }
+
+                # Print detailed results
+                print(f"\n{metric_name} Analysis:")
+                print(f"Top {n_classes} classes:")
+                for class_name, value, stats in analysis_results[metric_name]['top']:
+                    print(f"  {class_name}:")
+                    print(f"    - {metric_name}: {value:.4f}")
+                    print(
+                        f"    - Samples: {stats['total_samples']} ({stats['distribution']})")
+                    print(
+                        f"    - Correct predictions: {stats['correct_predictions']}")
+                    print(f"    - False positives: {stats['false_positives']}")
+                    print(f"    - False negatives: {stats['false_negatives']}")
+
+                print(f"\nBottom {n_classes} classes:")
+                for class_name, value, stats in analysis_results[metric_name]['bottom']:
+                    print(f"  {class_name}:")
+                    print(f"    - {metric_name}: {value:.4f}")
+                    print(
+                        f"    - Samples: {stats['total_samples']} ({stats['distribution']})")
+                    print(
+                        f"    - Correct predictions: {stats['correct_predictions']}")
+                    print(f"    - False positives: {stats['false_positives']}")
+                    print(f"    - False negatives: {stats['false_negatives']}")
+
+            # Save detailed analysis to file
+            analysis_path = os.path.join(
+                test_results_dir, 'class_performance_analysis.txt')
+            with open(analysis_path, 'w') as f:
+                f.write("=== Class Performance Analysis ===\n\n")
+
+                # Overall distribution
+                f.write("Class Distribution:\n")
+                for class_name in class_names:
+                    stats = confusion_stats[class_name]
+                    f.write(
+                        f"{class_name}: {stats['total_samples']} samples ({stats['distribution']})\n")
+                f.write("\n")
+
+                # Detailed metric analysis
+                for metric_name, results in analysis_results.items():
+                    f.write(f"{metric_name} Analysis:\n")
+                    f.write(f"Top {n_classes} classes:\n")
+                    for class_name, value, stats in results['top']:
+                        f.write(f"  {class_name}:\n")
+                        f.write(f"    - {metric_name}: {value:.4f}\n")
+                        f.write(
+                            f"    - Samples: {stats['total_samples']} ({stats['distribution']})\n")
+                        f.write(
+                            f"    - Correct predictions: {stats['correct_predictions']}\n")
+                        f.write(
+                            f"    - False positives: {stats['false_positives']}\n")
+                        f.write(
+                            f"    - False negatives: {stats['false_negatives']}\n")
+
+                    f.write(f"\nBottom {n_classes} classes:\n")
+                    for class_name, value, stats in results['bottom']:
+                        f.write(f"  {class_name}:\n")
+                        f.write(f"    - {metric_name}: {value:.4f}\n")
+                        f.write(
+                            f"    - Samples: {stats['total_samples']} ({stats['distribution']})\n")
+                        f.write(
+                            f"    - Correct predictions: {stats['correct_predictions']}\n")
+                        f.write(
+                            f"    - False positives: {stats['false_positives']}\n")
+                        f.write(
+                            f"    - False negatives: {stats['false_negatives']}\n")
+                    f.write("\n")
+
+            print(
+                f"\n✅ Saved detailed class performance analysis to {analysis_path}")
+
+            return analysis_results
+
+        except Exception as e:
+            print(f"❌ Error in class performance analysis: {str(e)}")
+            return None

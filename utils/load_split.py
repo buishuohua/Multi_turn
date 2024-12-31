@@ -211,6 +211,30 @@ def train_val_test_split(data, config):
     return X_train, X_val, X_test, y_train, y_val, y_test
 
 
+class TextDataset(torch.utils.data.Dataset):
+    def __init__(self, tokenized_data, labels, original_data, which, turn):
+        self.tokenized_data = tokenized_data
+        self.labels = labels
+        self.original_data = original_data  # Store original text
+        self.which = which  # 'question' or 'response'
+        self.turn = turn
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+        return (torch.tensor(self.tokenized_data[idx], dtype=torch.long),
+                torch.tensor(self.labels[idx], dtype=torch.long))
+
+    def get_original_data(self, idx):
+        """Return original text data for analysis"""
+        return {
+            'text': self.original_data[self.which][idx],
+            'label': self.original_data['category'][idx],
+            'turn': self.turn[idx]
+        }
+
+
 def loader(config):
     # Pass task type to _loader_data
     data = _loader_data(config.training_settings.task_type)
@@ -224,11 +248,19 @@ def loader(config):
         method=config.tokenizer_settings.truncation
     )
 
+    # Store original data before encoding
+    original_data = data.copy()
+
     label_encoder = LabelEncoder()
     data['category'] = label_encoder.fit_transform(data['category'])
 
     X_train, X_val, X_test, y_train, y_val, y_test = train_val_test_split(
         data, config)
+
+    # Store original data for each split
+    train_indices = X_train.index
+    val_indices = X_val.index
+    test_indices = X_test.index
 
     # Convert pandas Series to numpy arrays
     X_train_tokenized = np.array(
@@ -242,20 +274,27 @@ def loader(config):
         X_train_tokenized, y_train, config
     )
 
-    # Create datasets with numpy arrays
-    train_dataset = TensorDataset(
-        torch.tensor(X_train_resampled, dtype=torch.long),
-        torch.tensor(y_train_resampled, dtype=torch.long)
+    # Create custom datasets with original data
+    train_dataset = TextDataset(
+        X_train_resampled,
+        y_train_resampled,
+        original_data.iloc[train_indices],
+        config.data_settings.which,
+        original_data['turn'].iloc[train_indices]
     )
-    val_dataset = TensorDataset(
-        torch.tensor(
-            X_val[f"{config.data_settings.which}_tokenized"].tolist(), dtype=torch.long),
-        torch.tensor(y_val, dtype=torch.long)
+    val_dataset = TextDataset(
+        np.array(X_val[f"{config.data_settings.which}_tokenized"].tolist()),
+        y_val,
+        original_data.iloc[val_indices],
+        config.data_settings.which,
+        original_data['turn'].iloc[val_indices]
     )
-    test_dataset = TensorDataset(
-        torch.tensor(
-            X_test[f"{config.data_settings.which}_tokenized"].tolist(), dtype=torch.long),
-        torch.tensor(y_test, dtype=torch.long)
+    test_dataset = TextDataset(
+        np.array(X_test[f"{config.data_settings.which}_tokenized"].tolist()),
+        y_test,
+        original_data.iloc[test_indices],
+        config.data_settings.which,
+        original_data['turn'].iloc[test_indices]
     )
 
     # Create dataloaders

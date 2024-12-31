@@ -83,20 +83,21 @@ class BiLSTM(BaseLSTM):
             # Store residual
             residual = lstm_out
 
-            # LSTM forward pass - let PyTorch handle hidden state initialization
-            lstm_out, _ = lstm_layer(lstm_out)
-
             # Apply attention between LSTM layers
             if i < len(self.lstm) - 1 and self.attention_modules.get('inter_lstm'):
                 lstm_out = self.apply_attention(lstm_out,
                                                 self.attention_modules['inter_lstm'][i])
 
+            # LSTM forward pass - let PyTorch handle hidden state initialization
+            lstm_out, _ = lstm_layer(lstm_out)
+
             # Apply residual connection if enabled
             if self.config.model_settings.use_res_net:
+                alpha = 0.1
                 projected_residual = self.res_projections[i](residual)
                 if self.res_dropout is not None:
                     projected_residual = self.res_dropout(projected_residual)
-                lstm_out = lstm_out + projected_residual
+                lstm_out = lstm_out + alpha * projected_residual
 
             # Apply layer normalization if enabled
             if self.layer_norms is not None:

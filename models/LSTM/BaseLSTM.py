@@ -130,6 +130,7 @@ class BaseLSTM(nn.Module, ABC):
         super().__init__()
         self.config = config
         self.current_epoch = 0
+        self.start_epoch = 0
         self.state_manager = ModelStateManager(config)
 
         # Initialize checkpoint ensemble if ensemble strategy is enabled
@@ -178,46 +179,80 @@ class BaseLSTM(nn.Module, ABC):
     def _load_or_create_embedding_model(self):
         """Load embedding model with combined strategies"""
         embedding_model = self.config.tokenizer_settings.get_model().model
-        self._configure_fine_tuning(embedding_model)
+        if self.config.model_settings.fine_tune_embedding:
+            # First time loading when continuing training
+            if self.config.training_settings.continue_training and self.current_epoch == self.start_epoch:
+                latest_path = os.path.join(
+                    self.config.training_settings.fine_tuned_models_dir,
+                    self.config.training_settings.task_type,
+                    self.config.data_settings.which,
+                    self.config.model_settings.embedding_type,
+                    self.experiment_name,
+                    'latest',
+                    'embedding_model_latest.pt'
+                )
 
-        if self.config.training_settings.continue_training:
-            should_load = False
+                if os.path.exists(latest_path):
+                    try:
+                        checkpoint = torch.load(latest_path)
+                        embedding_model.load_state_dict(
+                            checkpoint['state_dict'])
+                        if 'fine_tune_config' in checkpoint:
+                            self._restore_fine_tune_state(
+                                embedding_model, checkpoint['fine_tune_config'])
+                        print(
+                            f"✅ Loaded latest embedding state for continued training (epoch {self.current_epoch})")
 
-            # Calculate adaptive reload frequency
-            base_freq = self.config.model_settings.fine_tune_reload_freq
-            # Decrease by 1 every 100 epochs
-            adaptive_freq = max(5, base_freq - (self.current_epoch // 100))
+                        # Configure fine-tuning after loading state
+                        self._configure_fine_tuning(embedding_model)
+                        return embedding_model
+                    except Exception as e:
+                        print(
+                            f"⚠️ Failed to load latest embedding state: {str(e)}")
 
-            # Check for periodic loading with adaptive frequency
-            if 'periodic' in self.config.model_settings.fine_tune_loading_strategies:
-                if (self.current_epoch % adaptive_freq == 0):
-                    should_load = True
-                    print(
-                        f"🔄 Adaptive periodic reload triggered at epoch {self.current_epoch} (freq={adaptive_freq})")
+            # For all subsequent epochs (or new training), configure fine-tuning first
+            self._configure_fine_tuning(embedding_model)
 
-            # Check for plateau detection
-            if 'plateau' in self.config.model_settings.fine_tune_loading_strategies:
-                if hasattr(self, 'val_loss_history') and len(self.val_loss_history) >= self.config.model_settings.plateau_patience:
-                    recent_losses = self.val_loss_history[-self.config.model_settings.plateau_patience:]
-                    if max(recent_losses) - min(recent_losses) < self.config.model_settings.plateau_threshold:
+            # Apply loading strategies during training (for both continued and new training)
+            if self.current_epoch > self.start_epoch:  # Only apply strategies after first epoch of current run
+                should_load = False
+
+                # Calculate adaptive reload frequency based on epochs since start
+                epochs_since_start = self.current_epoch - self.start_epoch
+                base_freq = self.config.model_settings.fine_tune_reload_freq
+                adaptive_freq = max(5, base_freq - (epochs_since_start // 100))
+
+                # Check reload strategies
+                if 'periodic' in self.config.model_settings.fine_tune_loading_strategies:
+                    if (epochs_since_start % adaptive_freq == 0):
                         should_load = True
                         print(
-                            f"📊 Plateau detected at epoch {self.current_epoch}")
+                            f"🔄 Adaptive periodic reload at epoch {self.current_epoch} (freq={adaptive_freq})")
 
-            if should_load and hasattr(self, 'checkpoint_ensemble') and self.checkpoint_ensemble is not None:
-                # Get ensemble weights
-                try:
-                    ensemble_state = self.checkpoint_ensemble.get_ensemble_weights()
-                    if ensemble_state is not None:
-                        embedding_model.load_state_dict(ensemble_state)
-                        print("✨ Loaded ensemble weights")
-                    else:
-                        self._load_model_weights(embedding_model, 'best')
-                        print("⚠️ No ensemble weights available, loaded best weights")
-                except Exception as e:
-                    print(
-                        f"⚠️ Warning: Failed to load ensemble weights: {str(e)}")
+                if 'plateau' in self.config.model_settings.fine_tune_loading_strategies:
+                    if hasattr(self, 'val_loss_history') and len(self.val_loss_history) >= self.config.model_settings.plateau_patience:
+                        recent_losses = self.val_loss_history[-self.config.model_settings.plateau_patience:]
+                        if max(recent_losses) - min(recent_losses) < self.config.model_settings.plateau_threshold:
+                            should_load = True
+                            print(
+                                f"📊 Plateau detected at epoch {self.current_epoch}")
 
+                # Load best or ensemble weights if needed
+                if should_load:
+                    if hasattr(self, 'checkpoint_ensemble') and self.checkpoint_ensemble is not None:
+                        try:
+                            ensemble_state = self.checkpoint_ensemble.get_ensemble_weights()
+                            if ensemble_state is not None:
+                                embedding_model.load_state_dict(ensemble_state)
+                                print("✨ Loaded ensemble weights")
+                            else:
+                                self._load_model_weights(
+                                    embedding_model, 'best')
+                                print(
+                                    "⚠️ No ensemble weights available, loaded best weights")
+                        except Exception as e:
+                            print(
+                                f"⚠️ Failed to load ensemble/best weights: {str(e)}")
         return embedding_model
 
     def save_checkpoint(self, val_loss):
@@ -244,7 +279,7 @@ class BaseLSTM(nn.Module, ABC):
 
         try:
             if os.path.exists(model_path):
-                checkpoint = torch.load(model_path, weights_only=True)
+                checkpoint = torch.load(model_path, weights_only=False)
                 embedding_model.load_state_dict(checkpoint['state_dict'])
                 print(f"✅ Loaded {load_type} fine-tuned embedding model")
                 return True
@@ -538,7 +573,7 @@ class BaseLSTM(nn.Module, ABC):
 
                 # Apply layer-specific learning rate if using discriminative learning rates
                 if self.config.model_settings.use_discriminative_lr:
-                    layer_position = len(layers_to_unfreeze) - \
+                    layer_position = layer_num - \
                         layers_to_unfreeze.index(layer_num)
                     param.lr_scale = self.config.model_settings.lr_decay_factor ** (
                         layer_position - 1)
@@ -550,6 +585,32 @@ class BaseLSTM(nn.Module, ABC):
             print(f"🔓 Epoch {epoch}: Unfroze layers {sorted(newly_unfrozen)}")
         print(f"📊 Currently unfrozen layers: {sorted(total_unfrozen)}")
 
-    def update_epoch(self, epoch: int):
+    def update_epoch(self, current_epoch: int, start_epoch: int):
         """Update the current epoch number"""
-        self.current_epoch = epoch
+        self.current_epoch = current_epoch
+        self.start_epoch = start_epoch
+
+    def _restore_fine_tune_state(self, embedding_model, fine_tune_config):
+        """Restore fine-tuning state from saved configuration"""
+        mode = fine_tune_config.get(
+            'mode', self.config.model_settings.fine_tune_mode)
+        unfrozen_layers = fine_tune_config.get('unfrozen_layers', [])
+
+        # First freeze all parameters
+        for param in embedding_model.parameters():
+            param.requires_grad = False
+
+        # Restore unfrozen layers
+        for name, param in embedding_model.named_parameters():
+            if name in unfrozen_layers:
+                param.requires_grad = True
+                if self.config.model_settings.use_discriminative_lr:
+                    # Restore learning rate scaling if needed
+                    layer_match = re.search(r'layer\.(\d+)\.', name)
+                    if layer_match:
+                        layer_num = int(layer_match.group(1))
+                        param.lr_scale = self.config.model_settings.lr_decay_factor ** (
+                            layer_num - 1)
+
+        print(
+            f"✅ Restored fine-tuning state with {len(unfrozen_layers)} unfrozen layers")
