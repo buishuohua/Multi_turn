@@ -602,15 +602,15 @@ class BaseLSTM(nn.Module, ABC):
 
         # Restore unfrozen layers
         for name, param in embedding_model.named_parameters():
-            if name in unfrozen_layers:
-                param.requires_grad = True
-                if self.config.model_settings.use_discriminative_lr:
-                    # Restore learning rate scaling if needed
-                    layer_match = re.search(r'layer\.(\d+)\.', name)
-                    if layer_match:
-                        layer_num = int(layer_match.group(1))
+            layer_match = re.search(r'layer\.(\d+)\.', name)
+            if layer_match:
+                layer_num = int(layer_match.group(1))
+                if layer_num in unfrozen_layers:  # Compare layer numbers instead of names
+                    param.requires_grad = True
+                    if self.config.model_settings.use_discriminative_lr:
                         param.lr_scale = self.config.model_settings.lr_decay_factor ** (
-                            layer_num - 1)
+                            unfrozen_layers.index(layer_num)
+                        )
 
         print(
             f"✅ Restored fine-tuning state with {len(unfrozen_layers)} unfrozen layers")

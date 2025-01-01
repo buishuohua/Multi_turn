@@ -22,6 +22,15 @@ class TokenizerSettings:
     padding: bool = True
     add_special_tokens: bool = True
 
+    def _get_base_type(self, model_name: str) -> str:
+        """Map full model name to base type"""
+        if any(name in model_name.lower() for name in ['bert', 'roberta']):
+            return 'bert'
+        elif 't5' in model_name.lower():
+            return 't5'
+        else:
+            raise ValueError(f"Unknown model type: {model_name}")
+
     def __post_init__(self):
         MAX_LENGTHS = {
             'BERT_base_uncased': 512,
@@ -42,6 +51,9 @@ class TokenizerSettings:
                 f"max_length ({self.max_length}) exceeds maximum allowed length "
                 f"({max_allowed}) for tokenizer {self.name}"
             )
+
+        # Automatically set embedding_type based on name
+        self.embedding_type = self._get_base_type(self.name)
 
     def get_model(self):
         if self.embedding_type == 'bert':

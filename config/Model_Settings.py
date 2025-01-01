@@ -112,10 +112,10 @@ class ModelSettings:
 
     # Fine-tuning loading strategies
     fine_tune_loading_strategies: List[str] = field(
-        default_factory=lambda: ['adaptive', 'plateau', 'ensemble']
+        default_factory=lambda: ['plateau', 'ensemble']
     )
-    fine_tune_reload_freq: int = 20  # For periodic loading
-    adaptive_base_freq: int = 10      # For adaptive loading
+    fine_tune_reload_freq: int = 1000  # For periodic loading
+    adaptive_base_freq: int = 1000      # For adaptive loading
     plateau_patience: int = 5         # For plateau loading
     plateau_threshold: float = 0.01   # For plateau loading
     ensemble_max_checkpoints: int = 3  # For ensemble loading
@@ -186,8 +186,6 @@ class ModelSettings:
                     layer: 1.0 - (0.05 * i)
                     for i, layer in enumerate(sorted(self.selective_layers, reverse=True))
                 }
-
-        self._validate_fine_tune_settings()
 
     def _get_model_name(self) -> str:
         """Convert embedding type to huggingface model name"""
@@ -267,12 +265,6 @@ class ModelSettings:
         # If there are any errors, raise them all at once
         if errors:
             raise ValueError("\n".join(errors))
-
-    def _validate_fine_tune_settings(self):
-        """Validate fine-tuning settings based on selected mode"""
-        # Add validation for fine_tune_reload_freq
-        if self.fine_tune_reload_freq < 0:
-            raise ValueError("fine_tune_reload_freq must be non-negative")
 
     def _validate_fine_tune_settings(self):
         """Validate fine-tuning settings based on selected mode"""

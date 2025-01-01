@@ -17,9 +17,9 @@ def config_set():
     config.model_settings.activation = 'gelu'
     config.training_settings.early_stopping_patience = 100
     config.training_settings.task_type = 'Multi'
-    config.model_settings.num_layers = 14
+    config.model_settings.num_layers = 16
     config.model_settings.custom_hidden_dims = [
-        1024, 1024, 512, 512, 256, 256, 128, 128, 64, 64, 64, 64, 64, 64]
+        1024, 1024, 768, 768, 512, 512, 384, 384, 256, 256, 128, 128, 64, 64, 64, 64]
     config.training_settings.learning_rate = 5e-5
     config.model_settings.fine_tune_lr = 2e-5
     config.model_settings.use_res_net = True
@@ -28,11 +28,11 @@ def config_set():
     config.model_settings.use_layer_norm = True
     config.model_settings.attention_temperature = 1.0
     config.model_settings.attention_positions = ['embedding', 'inter_lstm']
-    config.model_settings.use_attention = True
+    config.model_settings.use_attention = False
     config.model_settings.fine_tune_embedding = True
-    # config.model_settings.fine_tune_loading_strategies = [
-    #     'plateau', 'ensemble']
-    # config.model_settings.fine_tune_mode = 'gradual'
+    config.model_settings.fine_tune_loading_strategies = [
+        'plateau', 'ensemble']
+    config.model_settings.fine_tune_mode = 'gradual'
     config.model_settings.num_frozen_layers = 8
     config.model_settings.dropout_rate = 0.2
     config.model_settings.gradual_unfreeze_epochs = 100
