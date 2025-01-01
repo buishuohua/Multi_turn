@@ -23,7 +23,6 @@ def config_set():
     config.training_settings.learning_rate = 5e-5
     config.model_settings.fine_tune_lr = 2e-5
     config.model_settings.use_res_net = True
-    config.model_settings.use_attention = False
     config.training_settings.gradient_clip = 1.0
     config.training_settings.continue_training = True
     config.model_settings.use_layer_norm = True
@@ -31,9 +30,9 @@ def config_set():
     config.model_settings.attention_positions = ['embedding', 'inter_lstm']
     config.model_settings.use_attention = True
     config.model_settings.fine_tune_embedding = True
-    config.model_settings.fine_tune_loading_strategies = [
-    'plateau', 'ensemble']
-    config.model_settings.fine_tune_mode = 'gradual'
+    # config.model_settings.fine_tune_loading_strategies = [
+    #     'plateau', 'ensemble']
+    # config.model_settings.fine_tune_mode = 'gradual'
     config.model_settings.num_frozen_layers = 8
     config.model_settings.dropout_rate = 0.2
     config.model_settings.gradual_unfreeze_epochs = 100

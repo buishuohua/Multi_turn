@@ -666,14 +666,17 @@ class Trainer:
                 if checkpoint is not None:
                     self.start_epoch = checkpoint['epoch'] + 1
                     # Update model's current epoch
+                    self.early_stopped = checkpoint.get('early_stopped', False)
+                    self.patience_counter = checkpoint.get('patience_counter', 0)
+                    self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+                    
+                    # Update model's current epoch
                     self.model.update_epoch(self.start_epoch, self.start_epoch)
 
                     if self.early_stopped:
-                        print(
-                            "⚠️ Model had previously early-stopped")
+                        print("⚠️ Model had previously early-stopped at epoch", self.start_epoch)
                         return self.metrics_history
-                    print(
-                        f"✅ Resuming training from epoch {self.start_epoch + 1}")
+                    print( f"✅ Resuming training from epoch {self.start_epoch + 1}")
                 else:
                     print("⚠️ Failed to load checkpoint, starting from scratch")
                     self.start_epoch = 0
