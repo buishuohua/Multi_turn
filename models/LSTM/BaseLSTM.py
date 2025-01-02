@@ -167,9 +167,8 @@ class BaseLSTM(nn.Module, ABC):
         ) if config.model_settings.use_layer_norm else None
 
         # Add attention layer if enabled
-        self.attention = None
         if config.model_settings.use_attention:
-            self.attention = self._create_attention()
+            self.attention_modules = self._load_or_create_attention_modules()
 
         self.fc_layers = self._create_fc_layers()
 
@@ -194,7 +193,8 @@ class BaseLSTM(nn.Module, ABC):
 
                 if os.path.exists(latest_path):
                     try:
-                        checkpoint = torch.load(latest_path)
+                        checkpoint = torch.load(
+                            latest_path, weights_only=False)
                         embedding_model.load_state_dict(
                             checkpoint['state_dict'])
                         if 'fine_tune_config' in checkpoint:
@@ -279,7 +279,7 @@ class BaseLSTM(nn.Module, ABC):
 
         try:
             if os.path.exists(model_path):
-                checkpoint = torch.load(model_path, weights_only=False)
+                checkpoint = torch.load(model_path, weights_only=True)
                 embedding_model.load_state_dict(checkpoint['state_dict'])
                 print(f"✅ Loaded {load_type} fine-tuned embedding model")
                 return True
@@ -368,22 +368,6 @@ class BaseLSTM(nn.Module, ABC):
         total_params = sum(p.numel() for p in embedding_model.parameters())
         print(f"📊 Trainable parameters: {trainable_params:,} / {total_params:,} "
               f"({trainable_params/total_params:.1%})")
-
-    def _create_attention(self) -> Dict[str, nn.Module]:
-        """Create attention modules based on configuration"""
-        if not self.config.model_settings.use_attention:
-            return {}
-
-        attention_modules = {}
-        # Attention after embedding
-        attention_modules['embedding'] = MultiHeadAttention(self.config)
-        # Attention between LSTM layers
-        attention_modules['inter_lstm'] = [MultiHeadAttention(self.config)
-                                           for _ in range(len(self.config.model_settings.hidden_dims)-1)]
-        # Attention after final LSTM
-        attention_modules['output'] = MultiHeadAttention(self.config)
-
-        return attention_modules
 
     def _create_lstm(self) -> nn.Module:
         """Create LSTM layer with different hidden sizes for each layer"""
@@ -582,7 +566,8 @@ class BaseLSTM(nn.Module, ABC):
 
         # Log changes
         if newly_unfrozen:
-            print(f"🔓 Epoch {epoch}: Unfroze layers {sorted(newly_unfrozen)}")
+            print(
+                f"🔓 Epoch {epoch + 1}: Unfroze layers {sorted(newly_unfrozen)}")
         print(f"📊 Currently unfrozen layers: {sorted(total_unfrozen)}")
 
     def update_epoch(self, current_epoch: int, start_epoch: int):
@@ -614,3 +599,60 @@ class BaseLSTM(nn.Module, ABC):
 
         print(
             f"✅ Restored fine-tuning state with {len(unfrozen_layers)} unfrozen layers")
+
+    def _load_or_create_attention_modules(self) -> Dict[str, nn.Module]:
+        """Load or create attention modules based on configuration"""
+        if not self.config.model_settings.use_attention:
+            return {}
+
+        attention_modules = {}
+        attention_positions = self.config.model_settings.attention_positions
+
+        # Create attention modules based on configured positions
+        if 'embedding' in attention_positions:
+            attention_modules['embedding'] = MultiHeadAttention(self.config)
+
+        if 'inter_lstm' in attention_positions:
+            attention_modules['inter_lstm'] = [MultiHeadAttention(self.config)
+                                               for _ in range(len(self.config.model_settings.hidden_dims)-1)]
+
+        if 'output' in attention_positions:
+            attention_modules['output'] = MultiHeadAttention(self.config)
+
+        # First time loading when continuing training
+        if self.config.training_settings.continue_training:
+            latest_path = os.path.join(
+                self.config.training_settings.attention_dir,
+                self.config.training_settings.task_type,
+                self.config.data_settings.which,
+                self.experiment_name,
+                'latest',
+                'attention_latest.pt'
+            )
+
+            if os.path.exists(latest_path):
+                try:
+                    checkpoint = torch.load(latest_path, weights_only=True)
+
+                    # Load states for existing attention modules
+                    if 'embedding' in attention_modules and 'embedding_state' in checkpoint:
+                        attention_modules['embedding'].load_state_dict(
+                            checkpoint['embedding_state'])
+
+                    if 'inter_lstm' in attention_modules and 'inter_lstm_states' in checkpoint:
+                        for i, state in enumerate(checkpoint['inter_lstm_states']):
+                            if i < len(attention_modules['inter_lstm']):
+                                attention_modules['inter_lstm'][i].load_state_dict(
+                                    state)
+
+                    if 'output' in attention_modules and 'output_state' in checkpoint:
+                        attention_modules['output'].load_state_dict(
+                            checkpoint['output_state'])
+
+                    print(f"✅ Loaded latest attention state for continued training")
+                    return attention_modules
+                except Exception as e:
+                    print(
+                        f"⚠️ Failed to load latest attention state: {str(e)}")
+
+        return attention_modules

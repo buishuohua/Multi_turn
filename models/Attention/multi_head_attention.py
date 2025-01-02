@@ -10,7 +10,6 @@ class MultiHeadAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.device = config.training_settings.device
 
         # Use BERT's hidden size as input dimension
         self.hidden_dim = config.model_settings.embedding_dim
@@ -25,26 +24,35 @@ class MultiHeadAttention(nn.Module):
 
         # Create trainable linear transformations for each head
         self.q_projs = nn.ModuleList([
-            nn.Linear(self.hidden_dim, self.head_dim,
-                      bias=True).to(self.device)
+            nn.Linear(self.hidden_dim, self.head_dim, bias=True)
             for _ in range(self.num_heads)
         ])
         self.k_projs = nn.ModuleList([
-            nn.Linear(self.hidden_dim, self.head_dim,
-                      bias=True).to(self.device)
+            nn.Linear(self.hidden_dim, self.head_dim, bias=True)
             for _ in range(self.num_heads)
         ])
         self.v_projs = nn.ModuleList([
-            nn.Linear(self.hidden_dim, self.head_dim,
-                      bias=True).to(self.device)
+            nn.Linear(self.hidden_dim, self.head_dim, bias=True)
             for _ in range(self.num_heads)
         ])
 
         # Output projection
-        self.out_proj = nn.Linear(
-            self.hidden_dim, self.hidden_dim).to(self.device)
+        self.out_proj = nn.Linear(self.hidden_dim, self.hidden_dim)
 
-        # Initialize parameters with Xavier/Glorot initialization
+        # Dropout and layer norm
+        self.dropout = nn.Dropout(config.model_settings.attention_dropout)
+        self.layer_norm = nn.LayerNorm(self.hidden_dim)
+
+        # Initialize parameters
+        self._initialize_parameters()
+
+    def _initialize_parameters(self):
+        """Initialize attention parameters"""
+        # Initialize layer norm parameters first
+        nn.init.ones_(self.layer_norm.weight)  # Initialize to 1
+        nn.init.zeros_(self.layer_norm.bias)   # Initialize to 0
+
+        # Initialize attention head parameters
         for head_idx in range(self.num_heads):
             nn.init.xavier_uniform_(self.q_projs[head_idx].weight)
             nn.init.xavier_uniform_(self.k_projs[head_idx].weight)
@@ -52,43 +60,26 @@ class MultiHeadAttention(nn.Module):
             nn.init.zeros_(self.q_projs[head_idx].bias)
             nn.init.zeros_(self.k_projs[head_idx].bias)
             nn.init.zeros_(self.v_projs[head_idx].bias)
+
+        # Initialize output projection
         nn.init.xavier_uniform_(self.out_proj.weight)
         nn.init.zeros_(self.out_proj.bias)
 
-        # Dropout and layer norm
-        self.dropout = nn.Dropout(
-            config.model_settings.attention_dropout).to(self.device)
-        self.layer_norm = None  # Will be initialized in forward pass
-
-        # Dynamic projections
-        self.input_projection = None
-        self.output_projection = None
-
     def forward(self, x):
-        x = x.to(self.device)
         original_x = x  # Store for residual
         batch_size, seq_length, input_dim = x.size()
+        device = x.device
 
-        # Initialize layer norm if needed
-        if self.layer_norm is None or self.layer_norm.normalized_shape[0] != input_dim:
-            self.layer_norm = nn.LayerNorm(input_dim).to(self.device)
-
-        # Handle dimension mismatch
-        if input_dim != self.hidden_dim:
-            if self.input_projection is None or self.input_projection.in_features != input_dim:
-                self.input_projection = nn.Linear(
-                    input_dim, self.hidden_dim).to(self.device)
-            x = self.input_projection(x)
+        # Ensure layer norm is on the correct device
+        if self.layer_norm.weight.device != device:
+            self.to(device)
 
         # Apply layer normalization
-        x_norm = self.layer_norm(original_x)
-        if input_dim != self.hidden_dim:
-            x_norm = self.input_projection(x_norm)
+        x_norm = self.layer_norm(x)
 
         # Process each head separately
         head_outputs = []
         for head_idx in range(self.num_heads):
-            # Project input for this head
             # [batch_size, seq_length, head_dim]
             q = self.q_projs[head_idx](x_norm)
             # [batch_size, seq_length, head_dim]
@@ -109,32 +100,26 @@ class MultiHeadAttention(nn.Module):
         multi_head_output = torch.cat(head_outputs, dim=-1)
         output = self.out_proj(multi_head_output)
 
-        # Project back to input dimension if needed
-        if input_dim != self.hidden_dim:
-            if self.output_projection is None or self.output_projection.out_features != input_dim:
-                self.output_projection = nn.Linear(
-                    self.hidden_dim, input_dim).to(self.device)
-            output = self.output_projection(output)
-
         # Residual connection
         return original_x + output
 
     def to(self, device):
         """Moves all model parameters and buffers to the specified device"""
+        # Move base module
         super().to(device)
-        self.device = device
 
-        # Move all head-specific projections
-        for head_idx in range(self.num_heads):
-            self.q_projs[head_idx] = self.q_projs[head_idx].to(device)
-            self.k_projs[head_idx] = self.k_projs[head_idx].to(device)
-            self.v_projs[head_idx] = self.v_projs[head_idx].to(device)
-
-        # Move other components
+        # Move layer norm
         if self.layer_norm is not None:
             self.layer_norm = self.layer_norm.to(device)
-        if self.input_projection is not None:
-            self.input_projection = self.input_projection.to(device)
-        if self.output_projection is not None:
-            self.output_projection = self.output_projection.to(device)
+
+        # Move projections
+        for i in range(self.num_heads):
+            self.q_projs[i] = self.q_projs[i].to(device)
+            self.k_projs[i] = self.k_projs[i].to(device)
+            self.v_projs[i] = self.v_projs[i].to(device)
+
+        # Move output projection
+        if self.out_proj is not None:
+            self.out_proj = self.out_proj.to(device)
+
         return self

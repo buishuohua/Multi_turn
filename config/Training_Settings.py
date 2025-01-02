@@ -48,6 +48,9 @@ class TrainingSettings:
     # Directory for fine-tuned embedding models
     fine_tuned_models_dir: str = "fine_tuned_models"
 
+    # Directory for trained attention models
+    attention_dir: str = "trained_attention"
+
     # Scheduler settings
     scheduler_type: Literal['multi_group', 'reduce_lr_plateau',
                             'cosine', 'linear', 'none'] = 'multi_group'

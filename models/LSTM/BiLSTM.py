@@ -35,9 +35,6 @@ class BiLSTM(BaseLSTM):
         super().__init__(config)
         self.dropout = nn.Dropout(config.model_settings.dropout_rate)
 
-        # Create attention modules
-        self.attention_modules = self._create_attention()
-
         # Ensure hidden_dims is properly initialized
         if not hasattr(self.config.model_settings, 'hidden_dims') or not self.config.model_settings.hidden_dims:
             raise ValueError(

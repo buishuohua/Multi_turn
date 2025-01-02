@@ -28,7 +28,7 @@ def config_set():
     config.model_settings.use_layer_norm = True
     config.model_settings.attention_temperature = 1.0
     config.model_settings.attention_positions = ['embedding', 'inter_lstm']
-    config.model_settings.use_attention = False
+    config.model_settings.use_attention = True
     config.model_settings.fine_tune_embedding = True
     config.model_settings.fine_tune_loading_strategies = [
         'plateau', 'ensemble']

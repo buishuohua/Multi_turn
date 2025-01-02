@@ -152,16 +152,21 @@ class ModelSettings:
                 raise ValueError(f"Number of custom hidden dimensions ({len(self.custom_hidden_dims)}) "
                                  f"must match number of layers ({self.num_layers})")
             if not all(isinstance(dim, int) and dim > 0 for dim in self.custom_hidden_dims):
-                raise ValueError(
-                    "All custom hidden dimensions must be positive integers")
+                raise ValueError("All custom hidden dimensions must be positive integers")
             self.hidden_dims = self.custom_hidden_dims
             self.init_hidden_dim = None  # Set to None when using custom dims
         else:
             if self.init_hidden_dim is None:
-                raise ValueError(
-                    "Either init_hidden_dim or custom_hidden_dims must be provided")
-            self.hidden_dims = [self.init_hidden_dim //
-                                (2**i) for i in range(self.num_layers)]
+                raise ValueError("Either init_hidden_dim or custom_hidden_dims must be provided")
+            self.hidden_dims = [self.init_hidden_dim // (2**i) for i in range(self.num_layers)]
+
+        # Set default values for loading strategy parameters if strategies aren't selected
+        if self.fine_tune_loading_strategies:
+            if 'periodic' not in self.fine_tune_loading_strategies:
+                self.fine_tune_reload_freq = self.num_epochs
+                self.adaptive_base_freq = self.num_epochs
+            if 'adaptive' not in self.fine_tune_loading_strategies:
+                self.adaptive_base_freq = self.num_epochs
 
         if not all(isinstance(dim, int) and dim > 0 for dim in self.hidden_dims):
             raise ValueError("All hidden dimensions must be positive integers")
@@ -179,10 +184,7 @@ class ModelSettings:
         # Dynamically set layer_lr_multipliers based on selective_layers
         if self.fine_tune_mode == 'selective' and self.selective_layers:
             if self.layer_lr_multipliers is None:
-                # Create multipliers with gradually decreasing values
-                num_layers = len(self.selective_layers)
                 self.layer_lr_multipliers = {
-                    # Decrease by 5% for each earlier layer
                     layer: 1.0 - (0.05 * i)
                     for i, layer in enumerate(sorted(self.selective_layers, reverse=True))
                 }
@@ -475,7 +477,6 @@ class ModelSettings:
 
         return {
             'use_attention': True,
-            'dim': self.attention_dim,
             'num_heads': self.num_attention_heads,
             'dropout': self.attention_dropout,
             'temperature': self.attention_temperature,
